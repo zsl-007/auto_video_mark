@@ -1,0 +1,47 @@
+# ===== 运行时数据目录（大文件 + 可能含隐私数据）=====
+input/
+output/
+workdir/
+db/
+
+# ===== 模型权重（体积大，建议单独分发）=====
+models/*.pt
+models/*.onnx
+models/*.pth
+
+# ===== 环境与密钥 =====
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# ===== Python 缓存与构建产物 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# ===== 前端依赖与构建 =====
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ===== 日志与临时文件 =====
+*.log
+*.tmp
+*.pid
