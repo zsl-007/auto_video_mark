@@ -2,12 +2,10 @@
 
 目录监听驱动的批量视频隐私处理系统。将视频放入 `input` 目录，系统自动完成**分段 → 静态视频丢弃 → 人脸/车牌匿名化 → 合并（可选）**，结果输出到 `output` 目录。提供 Web 前端进行配置、任务监控、报错查看与统计分析，以 Docker 方式部署。
 
----
-
 ## 文档
 
 - **[产品需求文档（PRD）](docs/PRD.md)**：完整的功能规格、数据模型、流水线设计、错误处理策略、统计分析口径与部署方案。开发前请先通读。
-- [README](README.md)：快速上手、目录结构、开发约定。
+- README（本文）：快速上手、目录结构、开发约定。
 
 ---
 
@@ -102,6 +100,8 @@ video-anonymizer/
 ├── docker/
 │   ├── Dockerfile
 │   └── docker-compose.yml
+├── docs/
+│   └── PRD.md                  # 产品需求文档
 ├── tests/
 │   ├── unit/
 │   └── fixtures/               # 含不兼容编码的样例视频
@@ -192,7 +192,7 @@ cd docker
 docker compose up -d --build
 ```
 
-默认挂载 `./input`、`./output`、`./workdir`、`./models`、`./db`。GPU 使用见 `docker-compose.yml` 中 `deploy.resources.reservations.devices` 配置；无 GPU 时删除该块并将设备设为 `cpu`。
+默认挂载 `./input`、`./output`、`./workdir`、`./models`、`./db`。GPU 使用见 `docker-compose.yml` 中 `deploy.resources.reservations.devices` 配置；无 GPU 时删除该块并将设备设为 `cpu`。完整部署说明见 [PRD 第 9 节：部署方案](docs/PRD.md#9-部署方案docker)。
 
 ---
 
@@ -211,7 +211,7 @@ docker compose up -d --build
 | 设备 | auto | auto / cpu / cuda |
 | 高级参数 | 工具默认值 | imgsz / conf / scale / blur-strength / pixelate-blocks / mpdecimate 阈值 |
 
-设置变更仅对**之后入队**的任务生效；处理中任务使用创建时的 `settings_snapshot`。
+设置变更仅对**之后入队**的任务生效；处理中任务使用创建时的 `settings_snapshot`。完整设置规格见 [PRD 第 6 节：前端交互规格](docs/PRD.md#6-前端交互规格)。
 
 ---
 
@@ -222,11 +222,13 @@ docker compose up -d --build
 - **error_logs**：按 `stage` + `error_type` 记录，含 stderr 摘要。
 - **stats_daily**：按日预聚合，加速统计查询。
 
-详细字段见 PRD 第 5 节。
+详细字段见 [PRD 第 5 节：数据模型](docs/PRD.md#5-数据模型sqlite)。
 
 ---
 
 ## 关键设计说明
+
+设计细节、边界条件与失败兜底路径见 [PRD 第 3 节：功能需求](docs/PRD.md#3-功能需求) 与 [第 7 节：错误处理与健壮性](docs/PRD.md#7-错误处理与健壮性)。以下为开发时最常查阅的要点摘要。
 
 ### 编码纠偏策略
 
@@ -242,7 +244,7 @@ docker compose up -d --build
 
 ### 清理安全边界
 
-清理器只删除 `workdir/{task_id}/` 下的文件。**input 源文件与 output 最终结果永不触碰**。清理失败写入 `error_logs(cleanup_failed)`，不阻塞终态。
+清理器只删除 `workdir/{task_id}/` 下的文件。**input 源文件与 output 最终结果永不触碰**。清理失败写入 `error_logs(cleanup_failed)`，不阻塞终态。规则细节见 [PRD 3.7 中间文件清理](docs/PRD.md#37-中间文件清理)。
 
 ---
 
@@ -290,16 +292,16 @@ pytest tests/unit -q
 ## 常见问题
 
 **Q：视频是 `.mp4` 后缀但处理报 "codec not supported in container"？**
-A：这是预检纠偏的典型场景，系统会自动将不兼容音频转 AAC。若仍失败，检查 `workdir` 下的预检日志与 `error_logs`。
+A：这是预检纠偏的典型场景，系统会自动将不兼容音频转 AAC。若仍失败，检查 `workdir` 下的预检日志与 `error_logs`。策略见 [PRD 3.2 输入预检](docs/PRD.md#32-输入预检编码兼容性纠偏)。
 
 **Q：分段时长与设置不一致？**
-A：`segment` muxer 配合流拷贝时切分点落在关键帧上，实际时长会有浮动。需要精确时长可评估启用 HLS 分段方案。
+A：`segment` muxer 配合流拷贝时切分点落在关键帧上，实际时长会有浮动。需要精确时长可评估启用 HLS 分段方案。说明见 [PRD 3.3 视频分段](docs/PRD.md#33-视频分段)。
 
 **Q：没有 GPU 能用吗？**
 A：可以。`--device auto` 会回退到 CPU，吞吐下降。建议在纯 CPU 且核心充足时把匿名化阶段 `max_workers` 调至 2（需评估内存）。
 
 **Q：失败任务的中间文件为何找不到？**
-A：默认清理。设置 `KEEP_FAILED_INTERMEDIATE=true` 可临时保留，路径会写入报错记录。
+A：默认清理。设置 `KEEP_FAILED_INTERMEDIATE=true` 可临时保留，路径会写入报错记录。规则见 [PRD 3.7 中间文件清理](docs/PRD.md#37-中间文件清理)。
 
 ---
 
