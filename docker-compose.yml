@@ -1,0 +1,22 @@
+services:
+  video-anonymizer:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./workdir:/app/workdir
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - SEGMENT_DURATION=600
+      - SEGMENT_ENABLED=true
+      - STATIC_THRESHOLD=0.5
+      - ANONYMIZE_FACE=true
+      - ANONYMIZE_PLATE=true
+      - BLUR_METHOD=pixelate
+      - MERGE_ENABLED=true
+      - MAX_WORKERS_PER_STAGE=2
+      - QUEUE_MAXSIZE=20
+    restart: unless-stopped
