@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["files"])
 
 RUNNING_STATUSES: tuple[str, ...] = (
-    "prechecking", "segmenting", "static_checking", "anonymizing", "merging",
+    "prechecking", "compressing", "segmenting", "static_checking", "anonymizing", "merging",
 )
 TASK_LOOKBACK = timedelta(days=30)
 

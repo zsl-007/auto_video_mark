@@ -23,6 +23,8 @@ class SettingsPatch(BaseModel):
     anonymize_plate: bool | None = None
     blur_method: str | None = Field(default=None, pattern="^(pixelate|gaussian)$")
     merge_enabled: bool | None = None
+    video_compress_enabled: bool | None = None
+    min_resolution: int | None = Field(default=None, ge=144, le=2160)
 
 
 @router.get("")

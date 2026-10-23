@@ -23,12 +23,17 @@ scheduler = PipelineScheduler()
 observer = None
 cleaner_task = None
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global observer, cleaner_task
     init_db()
     await scheduler.start()
+
+    # 预热编码器探测，避免首个任务在编码器探测上阻塞
+    from app.core.hardware import best_encoder
+    enc = await asyncio.to_thread(best_encoder)
+    logger.info("视频编码器已就绪: %s", enc)
+
     loop = asyncio.get_running_loop()
     observer = start_watcher(scheduler, loop)
     cleaner_task = asyncio.create_task(cleaner_loop())

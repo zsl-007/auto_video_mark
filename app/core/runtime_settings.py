@@ -33,6 +33,8 @@ EDITABLE_KEYS = (
     "anonymize_plate",
     "blur_method",
     "merge_enabled",
+    "video_compress_enabled",
+    "min_resolution",
 )
 ALLOWED_BLUR_METHODS = ("pixelate", "gaussian")
 
@@ -50,6 +52,8 @@ def _defaults() -> dict[str, Any]:
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "blur_method": str(config.BLUR_METHOD),
         "merge_enabled": bool(config.MERGE_ENABLED),
+        "video_compress_enabled": bool(config.VIDEO_COMPRESS_ENABLED),
+        "min_resolution": int(config.MIN_RESOLUTION),
     }
 
 
@@ -106,8 +110,19 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
     if "merge_enabled" in patch:
         clean["merge_enabled"] = bool(patch["merge_enabled"])
 
-    return clean
+    if "video_compress_enabled" in patch:
+        clean["video_compress_enabled"] = bool(patch["video_compress_enabled"])
 
+    if "min_resolution" in patch:
+        try:
+            v = int(patch["min_resolution"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("min_resolution 必须是整数")
+        if not (144 <= v <= 2160):
+            raise SettingsValidationError("min_resolution 须在 144–2160 之间")
+        clean["min_resolution"] = v
+
+    return clean
 
 def _read_override() -> dict[str, Any]:
     if not OVERRIDE_PATH.exists():

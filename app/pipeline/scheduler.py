@@ -16,6 +16,7 @@ from app.core.runtime_settings import get_settings
 from app.db.session import SessionLocal
 from app.db.models import Task, Segment, ErrorLog
 from app.pipeline.precheck import precheck
+from app.pipeline.compress import compress
 from app.pipeline.segment import segment
 from app.pipeline.static_detect import detect_static
 from app.pipeline.anonymize import anonymize
@@ -106,10 +107,15 @@ class PipelineScheduler:
             await manager.broadcast({"task_id": task_id, "status": "prechecking"})
             prechecked = await asyncio.to_thread(precheck, source, WORKDIR)
 
+            task.status = "compressing"
+            db.commit()
+            await manager.broadcast({"task_id": task_id, "status": "compressing"})
+            compressed = await asyncio.to_thread(compress, prechecked, WORKDIR, settings, stem)
+
             task.status = "segmenting"
             db.commit()
             await manager.broadcast({"task_id": task_id, "status": "segmenting"})
-            segments = await asyncio.to_thread(segment, prechecked, WORKDIR, settings)
+            segments = await asyncio.to_thread(segment, compressed, WORKDIR, settings)
 
             task.status = "static_checking"
             db.commit()
@@ -210,14 +216,17 @@ class PipelineScheduler:
 def _cleanup_intermediates(stem: str):
     """删除 workdir 中该视频的中间产物（不动共享的 concat_list.txt）。
 
-    precheck 是否修复会决定分段目录名，两种都覆盖：
-    - precheck 未修复：{stem}_segments/
-    - precheck 已修复：{stem}_prechecked_segments/
+    precheck 修复 / compress 压缩 / 均不触发 会产生不同分段目录名，全部覆盖：
+    - 两者都未触发：{stem}_segments/
+    - precheck 修复但未压缩：{stem}_prechecked_segments/
+    - compress 压缩（无论 precheck 是否修复）：{stem}_compressed_segments/
     """
     candidates: list[Path] = [
         WORKDIR / f"{stem}_prechecked.mp4",
+        WORKDIR / f"{stem}_compressed.mp4",
         WORKDIR / f"{stem}_segments",
         WORKDIR / f"{stem}_prechecked_segments",
+        WORKDIR / f"{stem}_compressed_segments",
     ]
     candidates.extend(WORKDIR.glob(f"{stem}_anon_*.mp4"))
 

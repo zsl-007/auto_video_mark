@@ -56,3 +56,7 @@ MAX_UPLOAD_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", str(10 * 1024 * 1024 * 1024))
 
 # 上传残留清理
 STAGING_MAX_AGE = int(os.getenv("STAGING_MAX_AGE", "3600"))  # 默认 1 小时
+
+# 视频压缩（预检后、分段前，降低分辨率以加速后续处理）
+VIDEO_COMPRESS_ENABLED = os.getenv("VIDEO_COMPRESS_ENABLED", "true").lower() == "true"
+MIN_RESOLUTION = int(os.getenv("MIN_RESOLUTION", "480"))  # 目标像素高度，480 表示 480p
