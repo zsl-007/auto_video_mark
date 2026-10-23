@@ -1,419 +1,369 @@
 # 自动视频匿名化系统 PRD
 
-> 返回 [README](../README.md) ｜ 版本：v0.1 ｜ 状态：评审中
+> 返回 [README](../README.md) ｜ 版本：v2.0 ｜ 状态：已实现 v1.1 + 新增 v2 功能
 
 ## 1. 产品概述
 
 ### 1.1 产品定位
 
-构建一套**目录监听驱动的批量视频隐私处理系统**。用户在 `input` 目录投放视频源文件，系统自动完成分段、静态视频丢弃、人脸/车牌匿名化、合并（可选）并输出到 `output` 目录，全程无需人工干预。系统以 Docker 方式部署，提供 Web 前端用于配置、监控和统计。
+构建一套**目录监听驱动的批量视频隐私处理系统**。用户在 `input` 目录投放视频源文件（或通过 Web 上传），系统自动完成**预检 → 压缩（可选）→ 分段 → 静态丢弃 → 人脸/车牌匿名化 → 合并（可选）**，并输出到 `output` 目录，全程无需人工干预。系统以 Docker 方式部署，提供 Web 前端用于配置、监控、统计和文件管理。
 
 ### 1.2 核心约束与设计原则
 
-- **无人值守批处理**：文件到达即触发，流水线自动推进，失败可降级、可记录、可重试。
-- **编码健壮性优先**：不信任文件扩展名，对每个输入视频做 ffprobe 预检，对音频/视频编码不兼容 MP4 的情况自动纠正，分段与合并阶段编码失败有回退路径。
-- **源文件只读、中间文件即用即清**：`input` 目录源文件与 `output` 目录最终结果**永不删除、永不修改**；仅清理工作目录中的中间过程文件，磁盘占用可控。
-- **资源感知的流水线并行**：各阶段之间通过有界队列解耦，根据 CPU/内存水位动态调节并行度，避免压垮主机。
+- **无人值守批处理**：文件到达即触发，流水线自动推进，失败可降级、可记录。
+- **编码健壮性优先**：不信任扩展名，对每个输入文件 ffprobe 预检；视频编码器在**启动时运行时探测**（`h264_nvenc` / `h264_qsv` 实际可编码才用，否则回退 `libx264`）。
+- **源文件只读、输出只增**：`input/` 源文件与 `output/` 最终结果**不因流水线失败而删除或修改**；提供显式的文件删除 API/UI 用于运维手工清理。
+- **中间文件即用即清**：任务成功后立即清理该源文件在 `workdir/` 下的中间产物；失败保留供排查，由 cleaner 按 `workdir_max_age` 兜底清理。
+- **运行时配置热更新**：Web 端修改分段时长、静态阈值、压缩开关等，**只对之后入队的任务生效**；运行中任务使用任务开始时读取的配置快照。
 
 ## 2. 用户角色与使用场景
 
 | 角色 | 场景 |
 |---|---|
-| **运维/操作员** | 将视频批量放入 `input` 目录，在前端查看进度和报错，调整分段时长、是否合并等参数 |
-| **隐私合规人员** | 检查匿名化结果是否满足要求（人脸/车牌是否被充分模糊），查看统计报表 |
+| **运维/操作员** | 批量投放到 `input/`（或 Web 上传），在前端查看任务进度、删除文件、调整配置 |
+| **隐私合规人员** | 检查 output 产物是否满足匿名化要求，查看错误记录与统计摘要 |
 
-核心流程：**放入文件 → 自动检测 → 自动流水线处理 → 结果出现在 output → 前端查看状态**。
+核心流程：**投放/上传文件 → 自动预检 → 自动流水线处理 → 结果出现在 `output/` → 前端查看状态与下载**。
 
 ## 3. 功能需求
 
 ### 3.1 目录监听与任务生成
 
-使用 `watchdog` 监听 `input` 目录的新文件创建事件。文件创建事件可能早于文件写入完成，因此**不立即触发处理**，而是将任务置为 `pending`，由一个“就绪检查器”定期确认文件大小稳定（连续两次探测大小不变）后再入队。任务写入 SQLite，状态为 `queued`。
+`watchdog` 监听 `input/`。`on_created` 与 `on_moved`（上传落盘的原子重命名）都触发 `wait_until_stable`，每 `FILE_STABLE_CHECK_INTERVAL`（默认 2s）采样文件大小，连续两次相同即视为写入完成，写入 `tasks(status='queued')` 并入队。超过 `FILE_STABLE_MAX_WAIT`（默认 300s）仍未稳定则跳过并记 warning。
 
-支持的文件扩展名：`.mp4`、`.mov`、`.mkv`、`.avi`、`.m4v`、`.ts`。扩展名仅作为入口过滤，实际编码以 ffprobe 结果为准。
+支持扩展名：`.mp4` `.mov` `.mkv` `.avi`（`app/core/config.py::SUPPORTED_EXTENSIONS`）。
 
 ### 3.2 输入预检（编码兼容性纠偏）
 
-这是健壮性的第一道防线。对每个入队文件，在分段之前执行 **`ffprobe` 预检**：
+对每个入队文件执行 `ffprobe` 探测，若音轨 codec 属于 `amr_nb / dts / eac3 / truehd`，用 `-c:v <best_encoder> -c:a aac -movflags +faststart` 转封装到 `workdir/{stem}_prechecked.mp4`。否则原样透传。**源文件始终只读**。
 
-```bash
-ffprobe -v error -show_entries stream=codec_type,codec_name -of csv=p=0 input.mp4
-```
+`best_encoder` 由 `app/core/hardware.py` 在启动时探测，见 §4.4。
 
-检查逻辑：
+### 3.3 视频压缩（v2 新增）
 
-| 检查项 | 不兼容时处理 |
+在预检之后、分段之前。意图是降低后续 AI 推理的像素量以加速匿名化。
+
+| 条件 | 行为 |
 |---|---|
-| 视频编码不在 MP4 可封装集合（H.264/H.265/AV1 等） | 视频流统一转码为 `libx264` + `yuv420p` |
-| 音频编码不在 MP4 可封装集合（AAC/MP3 等） | 音频流转码为 `aac`，并显式指定 `-ar 44100 -ac 2` |
-| 音视频流参数（采样率、声道、像素格式）缺失或不标准 | 补全标准参数后重新封装/转码 |
+| `video_compress_enabled=False` | 跳过，原路径透传 |
+| 探测不到高度 | 跳过，记 warning |
+| 视频高度 ≤ `min_resolution` | 跳过（避免无意义重编码） |
+| 高度 > `min_resolution` | 等比缩放到目标高度（宽度按比例、取偶数），重编码到 `workdir/{stem}_compressed.mp4` |
 
-已知典型不兼容：`amr_nb`、`wavpack`、`dts`、`eac3`、`truehd` 等音频编码在 MP4 中可能无法写入头信息，表现为 `Could not find tag for codec ... not currently supported in container`。处理策略是**将 `-c copy` 替换为 `-c:v copy -c:a aac`（视频不重编码、仅音频转 AAC）**；若视频编码也不兼容，则 `-c:v libx264 -c:a aac`。
+编码器首选 `hardware.encoder_args()` 的选择；首选失败时**自动用 `libx264` 重试一次**（应对硬件编码器运行时不可用）。显式 `-pix_fmt yuv420p`，音频统一 `aac 128k`，`-movflags +faststart`。
 
-预检结果记录到任务的 `precheck_info` 字段（JSON），供后续阶段和统计使用。**预检纠偏产生的中间文件写入工作目录（workdir），源文件保留在 input 目录，系统对其只读、不修改。**
+### 3.4 视频分段
 
-### 3.3 视频分段
+`segment_enabled=True` 时按 `segment_duration` 分段，优先 `-c copy`；失败回退重编码。`segment_enabled=False` 时整文件作为单段。
 
-**分段策略**：当“是否分段”开启时，按用户设置的分段时长（默认 10 分钟）切分。使用 FFmpeg `segment` muxer，优先采用 `-c copy` 尝试流拷贝分段以保留画质并提速：
+分段产物在 `workdir/{stem}_segments/`（未压缩）或 `workdir/{stem}_compressed_segments/`（压缩后）。
 
-```bash
-ffmpeg -i input_fixed.mp4 -c copy -f segment -segment_time 600 -reset_timestamps 1 -segment_format mp4 part_%04d.mp4
-```
+### 3.5 静态视频丢弃
 
-**分段编码失败的兜底**：
+对每个分段计算 `detect_static(seg)`：用 `mpdecimate` 保留的帧数 / 总帧数得到 `frame_ratio`。若 `frame_ratio < static_threshold`（默认 **0.5**，即保留帧比例低于 50%）判定为静态，`Segment.status='dropped'`，不进入匿名化；否则 `status='kept'`。
 
-- **失败场景 A：`-c copy` 分段失败**（关键帧间隔或编码参数导致 muxer 报错）。回退到重新编码分段：`-c:v libx264 -c:a aac -force_key_frames "expr:gte(t,n_forced*SEG_DURATION)"`，强制在分段点生成关键帧，保证每个分段可独立播放。
-- **失败场景 B：某些分段产出 0 字节或无法被 ffprobe 读取**。该分段标记为 `segment_corrupt`，不进入后续流水线；若同一源文件超过 50% 分段损坏，整任务标记为 `failed` 并记录原因，否则对损坏分段跳过并告警。
-- **分段精度说明**：`segment` muxer 配合 `-c copy` 时切分点会落在最近的关键帧上，不保证严格等于设定时长。若对时长精度有强要求，备用方案为 HLS 分段：`-f hls -hls_time N -hls_flags split_by_time+round_durations`。PRD 默认采用 segment muxer 的关键帧对齐方案，在设置项中注明“实际分段时长可能因关键帧间隔略有浮动”。
+> 注意：默认阈值 0.5 相当激进，缓慢运动视频可能被误判。若出现"有用内容被丢"，请通过「运行配置」调低 `static_threshold`（如 0.2）。
 
-**不分段模式**：跳过分段，将预检纠偏后的文件直接作为单个“段”送入后续流水线。
+### 3.6 人脸/车牌匿名化
 
-### 3.4 静态视频丢弃
+调用 `privacy-blur` 子进程，参数由任务开始时的配置快照决定：
 
-对每个分段（或不分段时的完整文件）执行静态检测。使用用户指定的 `mpdecimate` 方案，以**输出结果的帧数作为判定依据**：
-
-```bash
-ffmpeg -i part_0000.mp4 -vf "mpdecimate,setpts=N/FRAME_RATE/TB" -an output_dt.mp4
-```
-
-判定规则：比较输入分段与 `output_dt.mp4` 的**视频帧数**。若 `output_dt` 的帧数低于输入帧数的 `static_threshold`（默认 0.05，即保留帧不足 5%），判定为“静态视频”，该分段被丢弃，不进入匿名化阶段。阈值可配置。
-
-`mpdecimate` 的内部阈值参数（`hi`、`lo`、`frac`）暴露为高级设置，默认使用 FFmpeg 默认值（`hi=64*12`，`lo=64*5`，`frac=0.33`）。若用户希望更激进地丢弃静态段，可提高 `frac` 或降低 `hi`。
-
-**注意**：静态丢弃只丢弃**整个分段**，不对分段内部做帧级裁剪。若分段中只有部分静态内容，仍保留该分段，后续匿名化处理正常进行。
-
-### 3.5 人脸匿名化与车牌匿名化
-
-调用 `video-privacy-blur` 的 CLI 作为子进程执行。该工具使用 Ultralytics YOLO 进行检测，OpenCV 进行模糊/马赛克，支持 CPU/GPU/MPS，人脸和车牌可独立开关。
-
-**调用参数映射**：
-
-| 系统设置 | `video-privacy-blur` 参数 |
+| 配置 | CLI 参数 |
 |---|---|
-| 人脸匿名化 开 | `--blur-faces`（或 `--no-blur-faces` 关闭） |
-| 车牌匿名化 开 | `--blur-plates`（或 `--no-blur-plates` 关闭） |
-| 设备选择 | `--device auto`（生产环境优先 `cuda`，不可用时回退 `cpu`） |
-| 匿名化方法 | `--method pixelate`（默认）或 `--method gaussian`（用户可切换） |
-| 人脸检测器 | `--face-detector yolo --face-yolo-weights models/yolov8n-face.pt`（YOLO 对人脸角度变化更鲁棒） |
-| 车牌模型 | `--plate-weights models/license_plate_detector.pt` |
+| `blur_method` | `--method pixelate` / `--method gaussian` |
+| `anonymize_plate` | 关闭时 `--no-blur-plates`；开启时 `--plate-weights models/license_plate_detector.pt` |
+| `anonymize_face` | 关闭时 `--no-blur-faces`；开启且 `FACE_DETECTOR=yolo` 时 `--face-detector yolo --face-yolo-weights models/yolov8n-face.pt` |
 
-`--imgsz`、`--conf`、`--scale` 作为高级参数暴露，默认分别为 `960`、`0.35`、`1.35`。匿名化方法的强度参数（`--blur-strength`、`--pixelate-blocks`）也作为高级设置，默认按工具推荐值。**默认匿名化方法为马赛克（pixelate）**，高斯模糊作为可选方法供用户切换。
+失败重试由 `tenacity` 控制（`ANONYMIZE_MAX_RETRIES` 默认 3，`ANONYMIZE_RETRY_BACKOFF` 默认 2.0）。若某分段最终失败，`scheduler` 抛出后整任务 `failed`（当前实现为"任一分段失败则任务失败"，不做"部分成功"处理）。
 
-**性能备注**：该工具中仅 YOLO 模型使用 GPU，Haar 人脸检测为纯 CPU。因此在 GPU 可用时，人脸检测器应选择 `yolo` 才能利用 GPU 加速。
+### 3.7 视频合并与输出
 
-**失败处理**：若 `video-privacy-blur` 在某个分段上以非零退出码结束，且该分段不是最后一个分段，标记该分段为 `anonymize_failed`，继续处理其他分段；若所有分段均失败，任务标记为 `failed`。失败原因截取 stderr 末 500 字符存入报错记录。
+| `anonymized` 段数 | `merge_enabled` | 输出 |
+|---|---|---|
+| 1 | 任意 | `output/{stem}_anonymized.mp4`（`shutil.move` 从 workdir 移到 output） |
+| >1 | True | `output/{stem}_anonymized.mp4`（concat demuxer；codec 不一致时 `encoder_args()` 重编码合并） |
+| >1 | False | `output/{stem}_anonymized_0000.mp4` … `_NNNN.mp4`（全部保留，不丢段） |
 
-### 3.6 视频合并
+**v1.1 修复**：单段不再遗留在 `workdir`；`merge_enabled=False` 不再静默丢弃除首段外的其余分段。
 
-当“是否合并”开启时，将所有成功完成匿名化的分段按原顺序合并为最终输出。合并策略取决于分段编码参数是否一致：
+### 3.8 Input 文件管理（v2 新增）
 
-- **编码参数一致**（分段阶段使用了 `-c copy` 或同一套重编码参数）：使用 **concat demuxer + `-c copy`**，无损快速合并：
+`GET /api/input-files` 列出 `input/` 所有文件，每项包含 `filename / size / mtime / status / task_id / error_message`。`status` 由该文件名最新任务推导：
 
-  ```bash
-  ffmpeg -f concat -safe 0 -i concat_list.txt -c copy output_final.mp4
-  ```
-
-- **编码参数不一致**（例如部分分段经历了重编码兜底、部分为流拷贝，或分辨率/像素格式有差异）：concat demuxer 无法直接拼接不匹配的流，此时使用 **concat filter 统一重编码**为 H.264/AAC MP4。
-
-合并失败的兜底：先尝试 `-c copy`；若 muxer 报错或输出无法播放，自动降级为 concat filter 重编码。重编码仍失败则将任务标记为 `merge_failed`，并在报错记录中提示可手动拼接。
-
-### 3.7 中间文件清理
-
-**清理范围原则**：系统只清理**工作目录（`workdir`）中由本系统产生的中间过程文件**。以下文件**永不删除、永不修改**：
-
-- **源文件**：`input` 目录中的原始视频文件，无论任务成功或失败，均原样保留在 `input` 目录，系统对其只读访问。
-- **最终输出文件**：`output` 目录中的最终结果视频。
-
-中间过程文件包括：预检纠偏产生的转码/重封装临时文件、分段文件、静态检测输出文件、匿名化阶段的输入/输出临时文件、合并阶段的临时文件与 concat 列表文件等。
-
-**清理时机与策略**：
-
-| 中间文件类型 | 清理时机 |
+| `Task.status` | 前端 `status` |
 |---|---|
-| 预检纠偏临时文件 | 分段阶段成功读取后立即删除；若分段阶段回退重编码，则在重编码完成后删除 |
-| 分段文件 | 该分段完成静态检测并成功进入匿名化阶段、且匿名化产出就绪后删除（流水线内清理） |
-| 静态检测输出文件 | 判定完成后立即删除（无论判定为静态丢弃还是保留） |
-| 匿名化输入/输出临时文件 | 该分段合并完成（或未开启合并时作为最终输出落盘）后删除 |
-| 合并临时文件、concat 列表 | 合并完成并校验输出可读后删除 |
+| 无任务 | `unprocessed` |
+| `prechecking / compressing / segmenting / static_checking / anonymizing / merging` | `processing` |
+| `completed` | `success` |
+| `failed` | `failed` |
+| `queued` | `unprocessed` |
 
-**任务终态清理**：
+`DELETE /api/input-files/{filename}`：
 
-- 任务进入 `completed` 或 `failed` 终态后，执行一次该任务工作子目录的兜底清理，删除残留的所有中间过程文件。
-- **兜底清理不触碰源文件和最终输出文件**。
-- 若任务 `failed` 且已产生部分匿名化分段（如合并失败场景），中间分段默认清理；仅在 `KEEP_FAILED_INTERMEDIATE=true`（默认 `false`）时保留供人工排查，且保留目录在报错记录中给出路径。
+- `processing` 状态：后端返回 `409`，前端按钮禁用
+- `queued`：先标记任务 `failed`（`error_message="源文件已被用户删除"`）再删文件，避免 worker 取到不存在的源
+- 其余状态：直接物理删除
 
-**清理失败处理**：清理失败（文件被占用、权限不足等）记录到 `cleanup_warnings` 与 `error_logs`（`error_type=cleanup_failed`），不阻塞任务状态变为终态，但前端报错记录中可见，供运维手动处理。
+路径安全：只取 basename，`resolve()` 后校验父目录，杜绝 `../` 穿越。
 
-**幂等性**：清理操作幂等，文件不存在视为清理成功；容器重启后的恢复流程不会因中间文件已删除而失败。
+### 3.9 Output 文件管理（v2 新增）
 
-**安全边界**：清理器以“任务工作子目录”（`workdir/{task_id}/`）为边界执行删除，从代码层面杜绝误删 `input` 与 `output` 路径。
+`GET /api/output-files` 列出文件。`DELETE /api/output-files/{filename}`：若存在 `status='merging'` 的任务则 `409`（避免删掉正在写入的产物），否则物理删除。
+
+### 3.10 运行配置在线编辑（v2 新增）
+
+- `GET /api/settings`：返回可编辑项 + 只读项（`max_upload_size` / `supported_extensions` / `input_dir` / `output_dir`）
+- `PUT /api/settings`：局部更新，Pydantic + `runtime_settings._validate` 双层校验
+- 持久化到 `data/settings.json`（原子写 + `threading.RLock` + mtime 缓存）
+- **只影响之后入队的任务**；运行中任务使用创建时读取的快照
+
+### 3.11 中间文件清理
+
+- 任务成功：`_cleanup_intermediates(stem)` 清理 `{stem}_prechecked.mp4`、`{stem}_compressed.mp4`、`{stem}_segments/`、`{stem}_prechecked_segments/`、`{stem}_compressed_segments/`、`{stem}_anon_*.mp4`
+- 任务失败：保留供排查
+- 定时 cleaner（`CLEANUP_INTERVAL` 默认 3600s）：清理 `workdir/` 中 mtime 超过 `WORKDIR_MAX_AGE`（默认 86400s）且不属于运行中任务的文件；清理 `input/.staging/` 中超过 `STAGING_MAX_AGE`（默认 3600s）的 `.part` 上传残留
 
 ## 4. 技术架构
 
 ### 4.1 整体架构
 
-采用 **FastAPI + SQLite（WAL 模式）+ 后台 Worker 进程/线程组 + watchdog 监听器** 的单体架构。FastAPI 处理 HTTP API 和 WebSocket 实时推送；后台 Worker 执行流水线；watchdog 独立线程负责目录监听。SQLite 开启 WAL 模式以支持前端读查询与后台写入并发。
-
 ```
-[watchdog] → 写入 tasks (queued)
+[watchdog] → tasks(queued)
                 ↓
-[调度器] ← 资源监控 (psutil)
-    ↓ 按阶段分发
-[分段 Worker] → [静态检测 Worker] → [匿名化 Worker] → [合并 Worker]
-    ↓ 各阶段间有界队列 (queue.Queue)
-[清理器]（仅清理 workdir）
+[PipelineScheduler] ← resource_ok() (psutil)
+    ↓ 单队列 + 多 worker
+[precheck] → [compress] → [segment] → [static_detect] → [anonymize] → [merge]
     ↓
-[FastAPI + WebSocket] → 前端
-[SQLite WAL] ← 统计查询
+[cleaner]（定时清理 workdir 与 staging）
+    ↓
+[FastAPI + WebSocket] → 前端（原生 HTML/CSS/JS）
+[SQLite WAL] ← 统计/任务查询
 ```
 
 ### 4.2 流水线并发模型
 
-核心设计是**阶段间流水线 + 阶段内多 worker**。每个阶段维护一个有界输入队列，若干 worker 从队列取任务处理后放入下一阶段队列。队列长度和 worker 数量由资源监控器动态调节。
-
-资源监控通过 `psutil` 采样 CPU 使用率和内存使用率。调节策略：
-
-- 当 `cpu_percent > CPU_HIGH`（默认 85%）或 `memory_percent > MEM_HIGH`（默认 85%）时，**减少**除“分段”和“清理”外各阶段的活跃 worker 数，但**不停止**已启动的 worker，让其在当前任务完成后自然退出。
-- 当资源回落到 `CPU_LOW`（默认 60%）和 `MEM_LOW`（默认 70%）以下时，**逐步增加** worker，上限为 `max_workers_per_stage`（默认：分段 1，静态 2，匿名化 1，合并 1）。
-- 匿名化阶段是 GPU/CPU 密集型，默认 `max_workers=1`，避免多个 YOLO 推理争抢显存/算力。若部署环境为纯 CPU 且核心数充足，可调高至 2。
-
-**阶段间背压**：当某阶段队列满时，上游 worker 阻塞在 `put()` 上，自然形成背压，防止中间文件无限膨胀。
+- **单队列 + 多 worker**：`asyncio.Queue(maxsize=QUEUE_MAXSIZE)`，`MAX_WORKERS_PER_STAGE` 个 worker 并发消费。**注意**：变量名虽为 `MAX_WORKERS_PER_STAGE`，实际是全局 worker 数（所有阶段共用），不是分阶段独立设置。
+- **资源闸**：worker 取到任务后先 `resource_ok()`（CPU < 85% 且内存 < 85%），否则把任务放回队列并 `sleep(RESOURCE_CHECK_INTERVAL)`。
+- 各阶段内通过 `asyncio.to_thread` 把阻塞的 ffmpeg/privacy-blur 子进程放到线程池，避免阻塞事件循环。
 
 ### 4.3 任务状态机
 
-每个源文件对应一个 `tasks` 记录，状态流转如下：
-
 ```
-queued → prechecking → segmenting → static_checking 
-→ anonymizing → merging → completed
-                              ↘ failed (任一阶段不可恢复)
+queued → prechecking → compressing → segmenting → static_checking
+       → anonymizing → merging → completed
+                              ↘ failed（任一阶段不可恢复）
 ```
 
-各阶段内部每个分段/子单元有独立的子状态，父任务状态由子状态聚合得出（全部完成→完成，任一不可恢复失败且影响最终输出→失败）。
+### 4.4 编码器运行时探测（v2 新增）
 
-## 5. 数据模型（SQLite）
+`ffmpeg -encoders` 只表示编译期支持，不代表容器内 GPU 可用。`app/core/hardware.py` 在**首次调用时**用 0.1s 黑帧真实编码一次，验证运行时可用性：
 
-### 5.1 `tasks` 表
+1. 若 `h264_nvenc` 编译存在，先试 `h264_nvenc`
+2. 失败则试 `h264_qsv`
+3. 都失败回退 `libx264`
+4. `functools.lru_cache` 缓存结果，避免每个任务重复探测
 
-| 列 | 类型 | 说明 |
-|---|---|---|
-| `id` | INTEGER PK | |
-| `source_path` | TEXT | input 目录中的源文件路径（只读，永不删除） |
-| `source_name` | TEXT | 源文件名 |
-| `source_size` | INTEGER | 字节数 |
-| `status` | TEXT | queued / prechecking / segmenting / static_checking / anonymizing / merging / completed / failed |
-| `settings_snapshot` | TEXT JSON | 任务创建时的设置快照（分段、时长、静态丢弃、人脸、车牌、合并、匿名化方法） |
-| `precheck_info` | TEXT JSON | ffprobe 结果及纠偏动作 |
-| `segment_count` | INTEGER | 分段总数（不分段时为 1） |
-| `static_dropped_count` | INTEGER | 被判定为静态并丢弃的分段数 |
-| `anonymized_count` | INTEGER | 成功匿名化的分段数 |
-| `output_path` | TEXT | 最终输出路径 |
-| `error_message` | TEXT | 失败原因摘要 |
-| `created_at` / `started_at` / `finished_at` | TEXT ISO8601 | |
-| `duration_seconds` | REAL | 源视频时长（ffprobe 获取） |
-| `processing_seconds` | REAL | 总处理耗时 |
+可选：`main.py::lifespan` 中预热（`await asyncio.to_thread(best_encoder)`），把探测提前到启动阶段。
 
-### 5.2 `segments` 表（子单元追踪）
+## 5. 数据模型（SQLite，位于 `data/video_anonymizer.db`）
+
+### 5.1 `tasks`
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| `id` | INTEGER PK | |
-| `task_id` | INTEGER FK | |
-| `part_index` | INTEGER | 分段序号 |
-| `part_path` | TEXT | 分段文件路径（workdir 内） |
-| `status` | TEXT | segmented / static_dropped / anonymized / anonymize_failed / merged / corrupt |
-| `static_keep_ratio` | REAL | 静态检测后保留帧比例 |
-| `anonymize_duration` | REAL | 匿名化耗时 |
-| `error_message` | TEXT | 该分段的错误信息 |
+| `id` | String PK | UUID |
+| `source_path` | String | 源文件绝对路径 |
+| `output_path` | String | 输出绝对路径（`completed` 后写入） |
+| `status` | String | `queued` / `prechecking` / `compressing` / `segmenting` / `static_checking` / `anonymizing` / `merging` / `completed` / `failed` |
+| `error_message` | String | 失败原因摘要 |
+| `retry_count` | Integer | 失败次数 |
+| `created_at` | DateTime | 创建时刻 |
+| `started_at` | DateTime | 开始处理时刻（v1.2 新增） |
+| `finished_at` | DateTime | 终态时刻（v1.2 新增） |
+| `updated_at` | DateTime | SQLAlchemy `onupdate` 自动刷新 |
 
-### 5.3 `error_logs` 表
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| `id` | INTEGER PK | |
-| `task_id` | INTEGER FK | |
-| `segment_id` | INTEGER FK nullable | |
-| `stage` | TEXT | precheck / segment / static / anonymize / merge / cleanup |
-| `error_type` | TEXT | codec_incompatible / segment_failed / anonymize_nonzero / merge_failed / cleanup_failed |
-| `message` | TEXT | 原始 stderr 摘要 |
-| `created_at` | TEXT | |
-
-### 5.4 `stats_daily` 表（预聚合统计）
+### 5.2 `segments`
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| `date` | TEXT PK | YYYY-MM-DD |
-| `files_total` / `files_completed` / `files_failed` | INTEGER | |
-| `bytes_input` / `bytes_output` | INTEGER | |
-| `segments_total` / `segments_static_dropped` / `segments_anonymized` | INTEGER | |
-| `total_processing_seconds` | REAL | |
-| `avg_processing_seconds` | REAL | |
+| `id` | Integer PK | |
+| `task_id` | String FK → tasks.id | |
+| `index` | Integer | 分段序号 |
+| `path` | String | 分段文件路径 |
+| `status` | String | `pending` / `kept` / `dropped` |
+| `frame_ratio` | Float | 静态检测保留帧比例 |
+| `created_at` | DateTime | |
+
+### 5.3 `error_logs`
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | Integer PK | |
+| `task_id` | String FK | |
+| `stage` | String | 失败阶段（`precheck` / `compressing` / `segmenting` / … / `unknown`） |
+| `message` | String | stderr 摘要 |
+| `created_at` | DateTime | |
+
+> 规划中：`stats_daily` 预聚合表、`error_logs.error_type` 分类、`segments.static_keep_ratio` 改名、`tasks.settings_snapshot` 显式快照字段。当前通过"任务开始时读取配置"实现隔离，未落库。
 
 ## 6. 前端交互规格
 
-### 6.1 页面结构
+### 6.1 技术形态
 
-**主仪表盘**：展示 `input_path` 和 `output_path` 的当前值（只读展示，路径在部署时通过环境变量注入）、当前处理任务列表、最近报错摘要。
+原生 HTML + CSS + JavaScript 单页应用，无构建步骤。文件：
 
-**设置面板**：
+```
+frontend/
+├── index.html
+├── css/style.css
+└── js/app.js
+```
 
-| 设置项 | 控件 | 默认值 |
+由 FastAPI 的 `StaticFiles(directory=BASE_DIR/"frontend", html=True)` 挂载到 `/`。
+
+### 6.2 页面结构
+
+| 区块 | 内容 |
+|---|---|
+| 顶部导航 | 品牌、WebSocket 状态徽章、刷新、主题切换（明/暗） |
+| 统计卡片 | 总任务 / 处理中 / 已完成 / 失败 / 丢弃分段 |
+| 上传区 | 拖拽或点击选择，多文件，进度条，支持格式与上限提示 |
+| 任务列表 | 表格，源文件 / 状态 / 进度 / 输出 / 创建时间 / 耗时 / 详情；支持状态、时间范围、关键字三重筛选；分页 10 条/页；简洁/详细视图切换 |
+| Input 文件 | 列表 + 状态徽章 + 分页（8 条/页）+ 删除 |
+| Output 文件 | 列表 + 分页（8 条/页）+ 删除 |
+| 错误日志 | 时间倒序，阶段 + 消息 + 时间 |
+| 运行配置 | 只读展示 + 「编辑」切换表单 |
+| 任务详情抽屉 | 完整字段 + 分段明细 + 该任务错误记录 |
+
+### 6.3 实时推送
+
+WebSocket `/ws/progress` 广播 `{task_id, status, output?, error?}`。前端收到后：
+
+1. `loadTasks()` 局部刷新
+2. `scheduleFilesRefresh()`（800ms 节流）刷新 input/output 列表
+3. `failed` / `completed` 时追加 `loadErrors()`
+
+断线指数退避重连（1s → 30s 上限），`ws.onclose` 触发。
+
+### 6.4 耗时口径
+
+| 展示 | 计算 | 含义 |
 |---|---|---|
-| 是否分段 | 开关 | 开 |
-| 分段时长（分钟） | 数字输入，1–120 | 10 |
-| 是否静态丢弃 | 开关 | 开 |
-| 静态判定阈值（保留帧比例） | 数字输入，0.01–0.5 | 0.05 |
-| 是否人脸匿名化 | 开关 | 开 |
-| 是否车牌匿名化 | 开关 | 开 |
-| 是否合并视频 | 开关 | 关 |
-| 匿名化方法 | 下拉：高斯模糊 / 马赛克 | **马赛克** |
-| 设备 | 下拉：auto / cpu / cuda | auto |
-| 高级参数（可折叠） | imgsz / conf / scale / blur-strength / pixelate-blocks / mpdecimate 阈值 | 工具默认值 |
+| 表格「耗时」 | `started_at → finished_at`（回退 `created_at → updated_at`） | 纯处理时间 |
+| 表格「（排队 X）」 | `created_at → started_at`（≥1s 才显示） | 排队等待 |
+| 抽屉「总耗时」 | `created_at → finished_at` | 端到端 |
 
-设置变更**仅对之后入队的任务生效**，已在处理中的任务使用其 `settings_snapshot`。
-
-**当前处理任务**：表格展示 `source_name`、状态（带颜色标识）、进度百分比、分段统计（总数/已静态丢弃/已匿名化）、已耗时。状态通过 WebSocket 实时更新，不依赖轮询。每行可展开查看分段级详情。
-
-**报错记录**：按时间倒序展示，可按 stage 和 error_type 筛选。每条记录展示任务名、阶段、错误摘要，点击可展开完整 stderr 片段。
-
-**统计分析**（详见第 8 节）：卡片和图表结合。
-
-### 6.2 实时推送
-
-使用 WebSocket 推送两类事件：`task_updated`（任务状态变更）和 `segment_updated`（分段状态变更）。前端建立单一 WebSocket 连接，按 `task_id` 过滤展示。连接断开时自动重连，重连后通过 REST 拉取当前快照。
+> 并行处理时单任务耗时不降反升是正常现象（排队 + 资源竞争），端到端总时间才是真实收益。详见 README FAQ。
 
 ## 7. 错误处理与健壮性
 
-### 7.1 分层错误处理策略
-
-| 层级 | 策略 |
-|---|---|
-| **预检层** | ffprobe 失败（文件损坏/不可读）→ 任务 `failed`，不进入后续阶段。编码不兼容 → 自动纠偏，记录 `precheck_info`，继续。源文件始终只读不修改。 |
-| **分段层** | `-c copy` 失败 → 自动重编码兜底；仍失败 → 任务 `failed`。个别分段 0 字节/不可读 → 标记 `corrupt`，若损坏比例 ≤ 50% 继续，否则整任务失败。 |
-| **静态层** | FFmpeg 非零退出 → 该分段不参与静态丢弃（视为“保留”），记录 warning，继续匿名化。判定依据缺失（无法获取帧数）→ 保守保留分段。 |
-| **匿名化层** | 单个分段失败 → 标记 `anonymize_failed`，其他分段继续。全部分段失败 → 任务 `failed`。 |
-| **合并层** | `-c copy` 失败 → concat filter 重编码兜底；仍失败 → 任务 `merge_failed`。 |
-| **清理层** | 仅清理 `workdir` 中间过程文件，**源文件与最终输出文件永不删除、永不修改**。清理失败记录 warning，不影响任务终态。 |
-
-### 7.2 超时与僵尸进程
-
-每个 FFmpeg / video-privacy-blur 子进程有可配置超时（默认：分段单段 600s，匿名化单段 1800s，合并 1800s）。超时后 `terminate()`，等待 10s 后 `kill()`，该子单元标记为超时失败，按上述分层策略处理。
-
-### 7.3 磁盘水位保护
-
-后台线程定期检查工作目录所在分区的可用空间。当可用空间低于 `DISK_LOW_GB`（默认 5 GB）时，**暂停从 queued 队列取新任务**，已在进行中的任务继续完成。恢复后自动继续。若可用空间低于 `DISK_CRITICAL_GB`（默认 1 GB），强制清理所有已完成任务的 workdir 中间文件并记录告警（**不触碰 input 源文件与 output 最终输出**）。
-
-## 8. 统计分析规格
-
-统计分析基于 `tasks` 和 `segments` 表聚合，`stats_daily` 作为加速缓存。前端展示以下维度：
-
-### 8.1 总量指标（支持按日/周/月切换）
-
-- 累计处理文件数、成功数、失败数、失败率。
-- 累计输入总时长、输出总时长、静态丢弃节省的时长。
-- 累计人脸匿名化分段数、车牌匿名化分段数（按 `settings_snapshot` 中的开关分组）。
-- 累计输入字节数、输出字节数、中间文件产生量（可估算，统计产生量而非保留量）。
-- **匿名化方法分布**（马赛克 / 高斯模糊的任务数与处理时长对比），便于评估不同方法的效率差异。
-
-### 8.2 效率指标
-
-- 平均单文件处理耗时（按文件时长分桶：<1min，1–10min，10–60min，>60min）。
-- 各阶段平均耗时占比（预检、分段、静态、匿名化、合并），以堆叠柱状图展示。
-- 匿名化阶段吞吐：平均每秒处理帧数（从 `anonymize_duration` 和视频帧率估算）。
-- **按匿名化方法（马赛克/高斯模糊）分组的平均匿名化耗时**，用于对比方法开销。
-
-### 8.3 质量/稳定性指标
-
-- 按 `error_type` 分组的报错数量趋势。
-- 预检纠偏发生率（`precheck_info` 中发生纠偏的文件数 / 总文件数）。
-- 分段损坏率、匿名化分段失败率、合并失败率。
-- 静态丢弃率（`static_dropped_count / segment_count` 的分布）。
-
-### 8.4 资源效率指标（可选，需 Worker 上报）
-
-- 平均 CPU 使用率、峰值内存使用率（按任务记录采样均值/最大值）。
-- GPU 可用时的匿名化加速比（对比 `--device cpu` 和 `--device cuda` 的历史平均耗时，若数据充足）。
-
-## 9. 部署方案（Docker）
-
-### 9.1 镜像设计
-
-以 `python:3.12-slim` 为基础，安装 `ffmpeg`、`git`、`watchdog`、`fastapi`、`uvicorn`、`psutil`、`sqlalchemy` 等依赖，克隆 `video-privacy-blur` 并 `pip install -e .`，下载 YOLO 模型到镜像内 `models/` 目录（或在首次启动时下载到挂载的持久化卷）。
-
-```dockerfile
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y ffmpeg git && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN git clone https://github.com/MengWoods/video-privacy-blur.git /opt/video-privacy-blur && \
-    cd /opt/video-privacy-blur && pip install -e .
-# 模型文件建议通过卷挂载或启动时下载，避免镜像过大
-COPY . .
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### 9.2 docker-compose 关键配置
-
-```yaml
-services:
-  video-anonymizer:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./input:/data/input
-      - ./output:/data/output
-      - ./workdir:/data/workdir
-      - ./models:/opt/video-privacy-blur/models
-      - ./db:/data/db
-    environment:
-      - INPUT_PATH=/data/input
-      - OUTPUT_PATH=/data/output
-      - WORK_DIR=/data/workdir
-      - DB_PATH=/data/db/tasks.sqlite
-      - CPU_HIGH=85
-      - MEM_HIGH=85
-      - DISK_LOW_GB=5
-      - KEEP_FAILED_INTERMEDIATE=false
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    # 如无 GPU，删除 deploy 块，设备设为 cpu
-```
-
-**GPU 注意事项**：Docker 中 FFmpeg/YOLO 使用 NVIDIA GPU 需要 `--gpus` 或 compose 的 `deploy.resources.reservations.devices` 配置，部分场景需要 `privileged` 或显式 capability。`video-privacy-blur` 的 `--device cuda` 依赖容器内可见 CUDA。若 GPU 不可用，`--device auto` 应回退到 CPU，但需确保 CUDA 探测不阻塞流水线。
-
-**资源限制**：compose 中应设置 `mem_limit` 和 `cpus`，防止流水线峰值拖垮宿主机。建议初始值 `mem_limit: 8g`、`cpus: 4.0`，根据实际硬件调整。
-
-### 9.3 持久化与恢复
-
-SQLite 数据库、模型文件、`input`/`output`/`workdir` 均通过卷挂载持久化。容器重启后，后台 Worker 启动时扫描 `tasks` 表中 `status` 不为终态（`completed`/`failed`）的任务，根据其 `status` 从相应阶段**恢复执行**（例如 `segmenting` 状态的任务重新从分段阶段开始，已存在的分段文件跳过）。工作目录中的中间文件在恢复时按分段状态判断是否可复用；**若中间文件已被清理，则从对应阶段重新生成，不依赖中间文件存在**。源文件始终保留在 `input` 目录，恢复过程可随时重新读取。
-
-## 10. 非功能性需求
-
-| 类别 | 要求 |
-|---|---|
-| **单文件处理可靠性** | 预检纠偏覆盖率 100%（所有入队文件均经过 ffprobe 检查）；编码不兼容导致的硬失败率 < 5% |
-| **流水线吞吐** | 在 4 核 / 8 GB 纯 CPU 环境下，对 10 分钟 1080p H.264 视频，端到端处理时间不超过视频时长的 3 倍（不含 GPU 加速） |
-| **前端响应** | WebSocket 状态更新延迟 < 2s；统计查询在 10 万条任务记录下响应 < 1s（依赖索引和预聚合表） |
-| **磁盘** | 稳态下 `workdir` 占用不超过当前处理中任务总输入大小的 2 倍；任务结束后 **`workdir` 中间过程文件清理率 100%**（**源文件与最终输出文件除外**，清理失败记录可查） |
-| **数据安全** | 源文件与最终输出文件零误删、零篡改；清理器以任务工作子目录为边界执行删除 |
-| **可观测性** | 每个失败有明确的 `stage` 和 `error_type`；前端可直接定位到源文件、分段和原始错误摘要 |
-
-## 11. 风险与待确认项
-
-| 风险 | 影响 | 缓解 |
+| 层级 | 当前实现 | 规划 |
 |---|---|---|
-| `video-privacy-blur` 模型对低分辨率/夜间车牌的召回率不足 | 车牌匿名化遗漏 | 暴露 `--conf` 和 `--scale` 供调优；统计中按 `settings_snapshot` 分组，便于对比不同参数的效果 |
-| `mpdecimate` 对“缓慢运动但非静态”视频误判 | 有用内容被丢弃 | 默认阈值保守（保留帧 > 5% 即不丢弃）；阈值可配置；统计中展示静态丢弃率分布供人工复核 |
-| 分段 `-c copy` 的时长不精确 | 与用户设置的分段时长有偏差 | 在 UI 中注明“实际时长受关键帧间隔影响”；提供 HLS 精确分段作为高级备选方案 |
-| GPU 在 Docker 中的可用性依赖宿主机配置 | 匿名化回退到 CPU，吞吐下降 | 部署文档中明确 GPU 前置条件；`--device auto` 探测失败时记录 warning 并回退，不阻塞任务 |
-| 马赛克默认值下，`--pixelate-blocks` 设置不当可能导致可辨识度残留 | 匿名化不充分 | 默认使用工具推荐块数；高级参数可调；统计中按匿名化方法分组，便于对马赛克方法的效果做人工抽检 |
-| 失败任务的中间文件默认清理，导致排障困难 | 问题定位成本上升 | 报错记录中保留源文件路径、分段序号、stderr 摘要；提供 `KEEP_FAILED_INTERMEDIATE` 开关供临时保留 |
+| 预检 | ffprobe 失败 → 任务 `failed`；不兼容 → 转封装后继续 | — |
+| 压缩 | 首选编码器失败 → `libx264` 重试；两次都失败 → 任务 `failed` | — |
+| 分段 | `-c copy` 失败 → 回退重编码；仍失败 → 任务 `failed` | 分段级 `corrupt` 状态与损坏比例容忍 |
+| 静态 | 判定失败按保留处理，继续 | — |
+| 匿名化 | 任一分段失败 → 任务 `failed`（`tenacity` 内部重试） | 分段级 `anonymize_failed` 容忍，允许"部分成功" |
+| 合并 | codec 一致 → `-c copy`；不一致 → 重编码 | concat filter 二级回退 |
+| 清理 | 任务成功立即清理；失败保留；定时 cleaner 兜底 | `KEEP_FAILED_INTERMEDIATE` 开关 |
+| 子进程超时 | **未实现**，由 ffmpeg 自身退出 | `terminate → kill` 二级超时 |
+| 磁盘水位 | **未实现**，仅 cleaner 定期清理 | 低于阈值时暂停取新任务 |
 
-**待确认**：`video-privacy-blur` 的 `--blur-strength` / `--pixelate-blocks` 默认值在 README 中未给出具体数值，开发时需以实际 CLI `--help` 输出为准，PRD 中暂列为“工具默认值”，在设置面板中以只读默认值展示，高级用户可覆盖。
+> 未实现项均在 §11 路线图中跟踪。
+
+## 8. 统计
+
+当前 `GET /api/stats/summary` 返回 3 个字段：`tasks_total`、`tasks_failed`、`segments_dropped`。前端统计卡片直接消费。
+
+**规划**（未实现）：`stats_daily` 预聚合、按日/周/月切换、按文件时长分桶、各阶段耗时占比、按 `blur_method` 分组的匿名化耗时对比、`precheck_info` 纠偏率、分段损坏率/失败率等。详见 §11。
+
+## 9. 部署（Docker）
+
+### 9.1 镜像
+
+`Dockerfile` 基于 `python:3.12-slim`，安装 ffmpeg 与依赖，`pip install privacy-blur`（或本地源码）。模型通过 `models/` 卷挂载。
+
+### 9.2 启动命令（推荐 `docker run`）
+
+```bash
+docker run -d \
+  --name auto_video_mark \
+  --restart unless-stopped \
+  -p 18000:8000 \
+  -v "$(pwd)/input":/app/input \
+  -v "$(pwd)/output":/app/output \
+  -v "$(pwd)/workdir":/app/workdir \
+  -v "$(pwd)/models":/app/models \
+  -v "$(pwd)/data":/app/data \
+  -e SEGMENT_DURATION=600 \
+  -e SEGMENT_ENABLED=true \
+  -e STATIC_THRESHOLD=0.5 \
+  -e ANONYMIZE_FACE=true \
+  -e ANONYMIZE_PLATE=true \
+  -e BLUR_METHOD=pixelate \
+  -e MERGE_ENABLED=false \
+  -e VIDEO_COMPRESS_ENABLED=true \
+  -e MIN_RESOLUTION=480 \
+  -e MAX_WORKERS_PER_STAGE=2 \
+  -e QUEUE_MAXSIZE=20 \
+  auto_video_mark:latest
+```
+
+### 9.3 GPU
+
+前置条件：NVIDIA 驱动 ≥ 535、Docker ≥ 23、`nvidia-container-toolkit` 已安装。启动命令加 `--gpus all`。容器内 `ffmpeg` 必须编译了 NVENC；否则 `hardware.best_encoder()` 会自动回退 `libx264`（任务不会失败）。
+
+### 9.4 持久化与恢复
+
+`input/` `output/` `workdir/` `models/` `data/` 均通过卷挂载。`data/` 含 `video_anonymizer.db` 与 `settings.json`。
+
+**恢复策略（当前）**：启动时只把 `status='queued'` 的任务重新入队。`prechecking` 等非终态任务**不会自动恢复**，需人工介入。**规划**：按状态从对应阶段恢复、中间文件可复用。
+
+## 10. 非功能需求（当前达成 / 规划）
+
+| 类别 | 当前状态 | 规划 |
+|---|---|---|
+| 编码健壮性 | 预检纠偏 + 压缩编码器回退 | — |
+| 前端响应 | WebSocket < 2s（同机测试） | 统计查询索引优化 |
+| 磁盘 | 任务成功后立即清理中间文件 | 磁盘水位保护 |
+| 数据安全 | 源文件只读；清理器不触碰 `input/` 与 `output/`；文件名 basename 校验 | — |
+| 可观测性 | `error_logs.stage` + `message` | `error_type` 分类、`precheck_info`、日志采样 |
+
+## 11. 风险与路线图
+
+### 11.1 风险
+
+| 风险 | 缓解 |
+|---|---|
+| `static_threshold` 默认 0.5 可能误丢缓慢运动视频 | 通过「运行配置」调低至 0.2/0.1；后续把默认值改为 0.05 并补充分段预览 |
+| 并行处理重任务时单任务耗时不降反升 | README FAQ 已说明；`MAX_WORKERS_PER_STAGE` 默认 2，GPU 单卡建议设 1 |
+| 硬件编码器（nvenc/qsv）运行时不可用 | `hardware.py` 启动探测 + `compress.py` 二次回退 |
+| 非终态任务在重启后不自动恢复 | 需人工排查；后续补"按状态恢复"逻辑 |
+| 失败任务中间文件保留占用磁盘 | 定时 cleaner 按 `WORKDIR_MAX_AGE` 清理 |
+
+### 11.2 路线图（按优先级）
+
+- [x] 目录监听 + 就绪检查
+- [x] ffprobe 预检与编码纠偏
+- [x] 视频压缩（v2）
+- [x] 分段（含重编码回退）
+- [x] 静态丢弃
+- [x] video-privacy-blur 集成
+- [x] 合并（含编码不一致回退）
+- [x] 单队列 + 多 worker + 资源闸
+- [x] 任务成功后立即清理中间文件
+- [x] 前端：任务列表 / 上传 / 错误 / 运行配置在线编辑
+- [x] 前端：Input/Output 文件管理
+- [x] 前端：分页 / 时间筛选 / 简洁视图 / 耗时拆分
+- [x] 前端：HTML/CSS/JS 拆分
+- [x] 编码器运行时探测与 `libx264` 兜底
+- [x] Docker GPU 部署（`--gpus all`）
+- [ ] 子进程超时（terminate → kill）
+- [ ] 磁盘水位保护
+- [ ] `stats_daily` 预聚合与统计图表
+- [ ] `error_logs.error_type` 分类
+- [ ] `KEEP_FAILED_INTERMEDIATE` 开关
+- [ ] 非终态任务按阶段恢复
+- [ ] 分段级 `corrupt` / `anonymize_failed` 容忍（允许部分成功）
+- [ ] HLS 精确分段
+- [ ] 测试补齐与 CI

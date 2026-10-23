@@ -1,25 +1,26 @@
 # 自动视频匿名化系统（Video Anonymizer）
 
-目录监听驱动的批量视频隐私处理系统。将视频放入 `input` 目录，系统自动完成**分段 → 静态视频丢弃 → 人脸/车牌匿名化 → 合并（可选）**，结果输出到 `output` 目录。提供 Web 前端进行配置、任务监控、报错查看与统计分析，以 Docker 方式部署。
+目录监听驱动的批量视频隐私处理系统。将视频放入 `input` 目录（或通过 Web 上传），系统自动完成**预检 → 压缩（可选）→ 分段 → 静态丢弃 → 人脸/车牌匿名化 → 合并（可选）**，结果输出到 `output` 目录。提供 Web 前端进行配置、任务监控、文件管理与错误查看，以 Docker 方式部署。
 
 ## 文档
 
-- **[产品需求文档（PRD）](docs/PRD.md)**：完整的功能规格、数据模型、流水线设计、错误处理策略、统计分析口径与部署方案。开发前请先通读。
-- README（本文）：快速上手、目录结构、开发约定。
+- **[产品需求文档（PRD）](docs/PRD.md)**：功能规格、数据模型、流水线设计、错误处理、部署方案与路线图。开发前请通读。
+- README（本文）：快速上手、目录结构、配置、常见问题。
 
 ---
 
 ## 功能特性
 
-- **目录自动监听**：`input` 目录投放文件即触发，文件写入完成后自动入队。
-- **编码健壮性**：基于 `ffprobe` 预检，自动纠偏 MP4 不兼容的音视频编码（如 `amr_nb`、`dts`、`eac3` 等）。
-- **可配置分段**：按用户设定时长分段（默认 10 分钟），流拷贝失败自动回退重编码；也支持不分段。
-- **静态视频丢弃**：使用 `mpdecimate` 检测，按保留帧比例判定静态分段并丢弃（阈值可配）。
-- **人脸 / 车牌匿名化**：集成 [`video-privacy-blur`](https://github.com/MengWoods/video-privacy-blur)，默认马赛克方法，可切换高斯模糊，人脸与车牌可独立开关。
-- **可选合并**：编码一致时 concat + 流拷贝，不一致时自动重编码合并。
-- **资源感知流水线**：阶段间有界队列 + 阶段内多 worker，依据 CPU/内存水位动态调节并发。
-- **中间文件即用即清**：仅清理 `workdir` 中间文件；**源文件与最终输出永不删除、永不修改**。
-- **前端可视化**：任务实时进度（WebSocket）、报错记录、详尽统计分析。
+- **目录自动监听**：`input/` 投放文件即触发；文件写入稳定后自动入队；Web 上传通过临时文件 + `os.replace` 原子落盘。
+- **编码健壮性**：ffprobe 预检，对 `amr_nb / dts / eac3 / truehd` 等不兼容音轨自动转 AAC；视频编码器在启动时**运行时探测**（`h264_nvenc` / `h264_qsv` 实测可用才用，否则回退 `libx264`）。
+- **视频压缩（v2 新增）**：预检后、分段前按目标分辨率等比缩放，降低后续 AI 推理像素量；编码器失败自动用 `libx264` 重试。
+- **可配置分段**：按 `segment_duration`（秒）分段；优先 `-c copy`，失败自动重编码；也支持不分段。
+- **静态视频丢弃**：`mpdecimate` 保留帧比例低于 `static_threshold` 的分段被丢弃。
+- **人脸 / 车牌匿名化**：集成 `video-privacy-blur`，支持马赛克 / 高斯模糊，人脸与车牌可独立开关；失败自动指数退避重试。
+- **可选合并**：编码一致时 `concat + -c copy`，不一致时重编码；关闭合并时多段全部输出。
+- **资源感知**：单队列 + 多 worker；取任务前检查 CPU/内存水位，偏高时回队等待。
+- **中间文件即用即清**：任务成功后立即清理 `workdir/` 中该源文件的中间产物；失败保留供排查，定时 cleaner 兜底。
+- **前端完整控制台**：上传、任务列表（状态/时间/关键字筛选、分页、简洁视图、耗时拆分）、Input/Output 文件管理（分页、状态、删除）、运行配置在线编辑、错误日志、WebSocket 实时进度、明暗主题。
 
 ---
 
@@ -28,20 +29,20 @@
 ```
 [watchdog] → tasks(queued)
                 ↓
-[调度器] ← 资源监控 (psutil)
+[PipelineScheduler] ← resource_ok() (psutil)
+    ↓ 单队列 + 多 worker
+[precheck] → [compress] → [segment] → [static_detect] → [anonymize] → [merge]
     ↓
-[分段 Worker] → [静态检测 Worker] → [匿名化 Worker] → [合并 Worker]
-    ↓ 有界队列（背压）
-[清理器]（仅 workdir）
+[cleaner]（定时清理 workdir 与 upload staging）
     ↓
-[FastAPI + WebSocket] → Web 前端
-[SQLite WAL] ← 统计查询
+[FastAPI + WebSocket] → 前端（原生 HTML/CSS/JS）
+[SQLite WAL] ← 任务/统计/配置查询
 ```
 
 **任务状态机**：
 
 ```
-queued → prechecking → segmenting → static_checking
+queued → prechecking → compressing → segmenting → static_checking
        → anonymizing → merging → completed
                               ↘ failed
 ```
@@ -53,61 +54,62 @@ queued → prechecking → segmenting → static_checking
 | 层 | 选型 |
 |---|---|
 | 后端 | Python 3.12、FastAPI、Uvicorn |
-| 数据 | SQLite（WAL 模式）、SQLAlchemy |
+| 数据 | SQLite（WAL）、SQLAlchemy |
 | 目录监听 | watchdog |
 | 资源监控 | psutil |
 | 媒体处理 | FFmpeg / ffprobe |
-| 匿名化引擎 | video-privacy-blur（Ultralytics YOLO + OpenCV） |
-| 前端 | 待定（建议 Vue/React + WebSocket） |
-| 部署 | Docker / docker-compose |
+| 匿名化引擎 | video-privacy-blur |
+| 前端 | 原生 HTML + CSS + JavaScript（无构建） |
+| 部署 | Docker |
 
 ---
 
-## 目录结构（建议脚手架）
+## 目录结构
 
 ```
-video-anonymizer/
+.
 ├── app/
-│   ├── main.py                 # FastAPI 入口
-│   ├── api/                    # REST 路由
-│   │   ├── tasks.py
-│   │   ├── settings.py
+│   ├── main.py                 # FastAPI 入口 + lifespan
+│   ├── api/
+│   │   ├── tasks.py            # 任务列表/详情/分段 + get_db
 │   │   ├── errors.py
-│   │   └── stats.py
-│   ├── ws/                     # WebSocket 推送
+│   │   ├── stats.py            # /api/stats/summary
+│   │   ├── settings.py         # GET/PUT /api/settings
+│   │   ├── upload.py           # POST /api/upload
+│   │   └── files.py            # input/output 文件管理
 │   ├── core/
-│   │   ├── config.py           # 环境变量 / 常量
+│   │   ├── config.py           # 路径与常量
+│   │   ├── runtime_settings.py # 运行时配置（data/settings.json）
+│   │   ├── hardware.py         # 编码器运行时探测
 │   │   ├── logging.py
-│   │   └── resources.py        # CPU/内存/磁盘监控
+│   │   └── resources.py        # resource_ok()
 │   ├── db/
-│   │   ├── models.py           # tasks / segments / error_logs / stats_daily
+│   │   ├── models.py           # Task / Segment / ErrorLog
 │   │   ├── session.py
 │   │   └── migrate.py
 │   ├── pipeline/
-│   │   ├── scheduler.py        # 任务调度与队列管理
-│   │   ├── precheck.py         # ffprobe 预检与纠偏
-│   │   ├── segment.py          # 分段
-│   │   ├── static_detect.py    # 静态丢弃
-│   │   ├── anonymize.py        # video-privacy-blur 调用
-│   │   ├── merge.py            # 合并
-│   │   └── cleanup.py          # workdir 清理（带安全边界）
-│   ├── watcher/
-│   │   └── input_watcher.py    # watchdog + 就绪检查
-│   └── media/
-│       └── ffmpeg_utils.py     # 子进程封装、超时、stderr 截取
-├── frontend/                   # 前端源码
-├── models/                     # YOLO 权重（卷挂载）
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
-├── docs/
-│   └── PRD.md                  # 产品需求文档
-├── tests/
-│   ├── unit/
-│   └── fixtures/               # 含不兼容编码的样例视频
+│   │   ├── scheduler.py        # 单队列 + 多 worker
+│   │   ├── watcher.py          # watchdog + 稳定性等待
+│   │   ├── precheck.py
+│   │   ├── compress.py         # v2
+│   │   ├── segment.py
+│   │   ├── static_detect.py
+│   │   ├── anonymize.py
+│   │   ├── merge.py
+│   │   └── cleaner.py
+│   └── ws/
+│       └── progress.py         # WebSocket ConnectionManager
+├── frontend/
+│   ├── index.html
+│   ├── css/style.css
+│   └── js/app.js
+├── input/                      # 挂载：源文件
+├── output/                     # 挂载：最终产物
+├── workdir/                    # 挂载：中间产物（自动清理）
+├── models/                     # 挂载：YOLO 权重
+├── data/                       # 挂载：video_anonymizer.db + settings.json
+├── docs/PRD.md
 ├── requirements.txt
-├── .env.example
-├── .gitignore
 └── README.md
 ```
 
@@ -115,136 +117,188 @@ video-anonymizer/
 
 ## 环境要求
 
-- Python 3.12+
-- FFmpeg（含 ffprobe），系统需可调用 `ffmpeg` / `ffprobe`
-- （可选）NVIDIA GPU + CUDA，用于加速 YOLO 推理
-- Docker 24+ / docker-compose v2（部署时）
+- Python 3.12+（本地开发）
+- FFmpeg + ffprobe（含 `libx264`；可选 `h264_nvenc` / `h264_qsv`）
+- Docker 23+（部署）；可选 NVIDIA 驱动 + `nvidia-container-toolkit`（GPU）
+- `privacy-blur` CLI 可用（`pip install` 或镜像内置）
 
 ---
 
 ## 快速开始
 
-### 1. 克隆与依赖
+### 1. Docker（推荐）
 
 ```bash
-git clone <your-repo-url> video-anonymizer
-cd video-anonymizer
+docker build -t auto_video_mark:latest .
+mkdir -p input output workdir models data
+
+docker run -d \
+  --name auto_video_mark \
+  --restart unless-stopped \
+  -p 18000:8000 \
+  -v "$(pwd)/input":/app/input \
+  -v "$(pwd)/output":/app/output \
+  -v "$(pwd)/workdir":/app/workdir \
+  -v "$(pwd)/models":/app/models \
+  -v "$(pwd)/data":/app/data \
+  auto_video_mark:latest
+```
+
+浏览器打开 `http://localhost:18000`。把视频拖入「上传视频」区域，或直接把文件复制到 `input/`。
+
+### 2. 启用 GPU（可选）
+
+前置条件：NVIDIA 驱动 ≥ 535、Docker ≥ 23、`nvidia-container-toolkit` 已安装。
+
+```bash
+nvidia-smi
+docker run --rm --gpus all ubuntu nvidia-smi    # 应能输出 GPU 信息
+```
+
+启动加 `--gpus all`：
+
+```bash
+docker run -d \
+  --name auto_video_mark \
+  --restart unless-stopped \
+  --gpus all \
+  -p 18000:8000 \
+  -v "$(pwd)/input":/app/input \
+  -v "$(pwd)/output":/app/output \
+  -v "$(pwd)/workdir":/app/workdir \
+  -v "$(pwd)/models":/app/models \
+  -v "$(pwd)/data":/app/data \
+  auto_video_mark:latest
+```
+
+确认使用哪个编码器：
+
+```bash
+docker logs auto_video_mark 2>&1 | grep -i "编码器"
+# 例：选用视频编码器: h264_nvenc   或  选用视频编码器: libx264
+```
+
+> **注意**：`--gpus all` 只解决设备透传，容器内 `ffmpeg` 必须编译了 NVENC。若 `ffmpeg -encoders | grep nvenc` 无输出，需要换用支持 NVENC 的 ffmpeg 镜像。系统会自动回退 `libx264`，任务不会因此失败。
+
+### 3. 本地开发
+
+```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-安装匿名化引擎（本地开发）：
-
-```bash
-git clone https://github.com/MengWoods/video-privacy-blur.git ../video-privacy-blur
-pip install -e ../video-privacy-blur
-```
-
-### 2. 准备目录与模型
-
-```bash
-mkdir -p input output workdir db models
-# 将 YOLO 权重放入 models/（yolov8n-face.pt、license_plate_detector.pt 等）
-```
-
-### 3. 配置环境变量
-
-```bash
-cp .env.example .env
-# 按需修改路径与阈值
-```
-
-`.env.example` 关键项：
-
-```dotenv
-INPUT_PATH=./input
-OUTPUT_PATH=./output
-WORK_DIR=./workdir
-DB_PATH=./db/tasks.sqlite
-MODELS_DIR=./models
-
-# 资源水位（百分比）
-CPU_HIGH=85
-CPU_LOW=60
-MEM_HIGH=85
-MEM_LOW=70
-
-# 磁盘保护（GB）
-DISK_LOW_GB=5
-DISK_CRITICAL_GB=1
-
-# 失败任务是否保留中间文件（排障用）
-KEEP_FAILED_INTERMEDIATE=false
-```
-
-### 4. 启动
-
-```bash
+export BASE_DIR="$(pwd)"
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-打开 `http://localhost:8000`。向 `input/` 放入视频文件，观察任务自动推进。
-
-### 5. Docker 部署
-
-```bash
-cd docker
-docker compose up -d --build
-```
-
-默认挂载 `./input`、`./output`、`./workdir`、`./models`、`./db`。GPU 使用见 `docker-compose.yml` 中 `deploy.resources.reservations.devices` 配置；无 GPU 时删除该块并将设备设为 `cpu`。完整部署说明见 [PRD 第 9 节：部署方案](docs/PRD.md#9-部署方案docker)。
-
 ---
 
-## 配置项（前端设置面板）
+## 配置
 
-| 设置项 | 默认值 | 说明 |
+### 在线编辑（推荐）
+
+前端「运行配置」→「编辑」→ 修改 →「保存」。变更落在 `data/settings.json`，**只对之后入队的任务生效**（运行中任务使用创建时的快照）。
+
+| 配置 | 默认 | 范围 / 说明 |
 |---|---|---|
-| 是否分段 | 开 | 关闭则整文件作为单段 |
-| 分段时长（分钟） | 10 | 1–120；实际时长受关键帧间隔影响 |
-| 是否静态丢弃 | 开 | |
-| 静态判定阈值（保留帧比例） | 0.05 | 低于该比例判定为静态 |
-| 是否人脸匿名化 | 开 | |
-| 是否车牌匿名化 | 开 | |
-| 是否合并视频 | 关 | |
-| 匿名化方法 | **马赛克** | 可选：马赛克 / 高斯模糊 |
-| 设备 | auto | auto / cpu / cuda |
-| 高级参数 | 工具默认值 | imgsz / conf / scale / blur-strength / pixelate-blocks / mpdecimate 阈值 |
+| 启用分段 | 是 | 关闭则整文件作为单段 |
+| 分段时长 | 600 秒 | 1–7200 |
+| 静态阈值 | 0.5 | 0–1；保留帧比例低于该值判定静态 |
+| 人脸匿名化 | 是 | |
+| 车牌匿名化 | 是 | |
+| 模糊方式 | 马赛克 | `pixelate` / `gaussian` |
+| 启用合并 | 是 | 关闭时多段分别输出 |
+| 启用视频压缩 | 是 | 压缩阶段总开关 |
+| 目标分辨率 | 480 | 144–2160；源视频高度不超过该值时不压缩 |
 
-设置变更仅对**之后入队**的任务生效；处理中任务使用创建时的 `settings_snapshot`。完整设置规格见 [PRD 第 6 节：前端交互规格](docs/PRD.md#6-前端交互规格)。
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BASE_DIR` | `/app` | 数据根目录 |
+| `SEGMENT_DURATION` | `600` | 分段时长（秒） |
+| `SEGMENT_ENABLED` | `true` | |
+| `STATIC_THRESHOLD` | `0.5` | |
+| `ANONYMIZE_FACE` | `true` | |
+| `ANONYMIZE_PLATE` | `true` | |
+| `BLUR_METHOD` | `pixelate` | |
+| `MERGE_ENABLED` | `true` | |
+| `VIDEO_COMPRESS_ENABLED` | `true` | v2 |
+| `MIN_RESOLUTION` | `480` | v2 |
+| `MAX_UPLOAD_SIZE` | `10737418240` | 字节 |
+| `MAX_WORKERS_PER_STAGE` | `2` | 全局 worker 数（所有阶段共用） |
+| `QUEUE_MAXSIZE` | `20` | |
+| `RESOURCE_CHECK_INTERVAL` | `10` | 资源回队等待（秒） |
+| `ANONYMIZE_MAX_RETRIES` | `3` | |
+| `ANONYMIZE_RETRY_BACKOFF` | `2.0` | |
+| `FILE_STABLE_CHECK_INTERVAL` | `2.0` | 就绪采样间隔（秒） |
+| `FILE_STABLE_MAX_WAIT` | `300` | 就绪等待上限（秒） |
+| `CLEANUP_INTERVAL` | `3600` | cleaner 巡检间隔（秒） |
+| `WORKDIR_MAX_AGE` | `86400` | workdir 保留时长（秒） |
+| `STAGING_MAX_AGE` | `3600` | 上传残留清理阈值（秒） |
+
+`data/settings.json` 中的覆盖值优先于 `config.py` 的默认值。
 
 ---
 
 ## 数据模型（简述）
 
-- **tasks**：每个源文件一条，含状态、设置快照、预检信息、分段/静态/匿名化计数、输出路径、耗时。
-- **segments**：分段级子状态（`segmented` / `static_dropped` / `anonymized` / `anonymize_failed` / `merged` / `corrupt`）。
-- **error_logs**：按 `stage` + `error_type` 记录，含 stderr 摘要。
-- **stats_daily**：按日预聚合，加速统计查询。
+- **`tasks`**：`id` / `source_path` / `output_path` / `status` / `error_message` / `retry_count` / `created_at` / `started_at` / `finished_at` / `updated_at`
+- **`segments`**：`task_id` / `index` / `path` / `status(pending|kept|dropped)` / `frame_ratio`
+- **`error_logs`**：`task_id` / `stage` / `message`
 
-详细字段见 [PRD 第 5 节：数据模型](docs/PRD.md#5-数据模型sqlite)。
+完整字段与规划项（`stats_daily`、`error_type` 分类等）见 [PRD 第 5 节](docs/PRD.md#5-数据模型sqlite位于-datavideo_anonymizerdb)。
+
+---
+
+## API 参考
+
+```bash
+# 配置
+curl http://localhost:18000/api/settings | jq
+curl -X PUT http://localhost:18000/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"video_compress_enabled": true, "min_resolution": 480}'
+
+# 任务
+curl http://localhost:18000/api/tasks | jq
+curl http://localhost:18000/api/tasks/<id>/segments | jq
+
+# 文件
+curl http://localhost:18000/api/input-files  | jq
+curl http://localhost:18000/api/output-files | jq
+curl -X DELETE http://localhost:18000/api/input-files/che1.mp4
+curl -X DELETE http://localhost:18000/api/output-files/che1_anonymized.mp4
+
+# 统计
+curl http://localhost:18000/api/stats/summary | jq
+```
 
 ---
 
 ## 关键设计说明
 
-设计细节、边界条件与失败兜底路径见 [PRD 第 3 节：功能需求](docs/PRD.md#3-功能需求) 与 [第 7 节：错误处理与健壮性](docs/PRD.md#7-错误处理与健壮性)。以下为开发时最常查阅的要点摘要。
+### 编码器运行时探测
 
-### 编码纠偏策略
+`ffmpeg -encoders` 只表示编译期支持；运行时真实编码一次才算可用。`hardware.best_encoder()` 用 0.1s 黑帧试 `h264_nvenc` → `h264_qsv` → `libx264`，结果缓存。避免容器无 GPU 时在任务中途崩溃。
 
-预检不兼容时：视频不兼容 → `-c:v libx264 -c:a aac`；仅音频不兼容 → `-c:v copy -c:a aac -ar 44100 -ac 2`。所有纠偏产物写入 `workdir`，源文件保持只读。
+### 压缩
 
-### 静态丢弃判定
+`compress.py` 只对"高度 > `min_resolution`"的视频触发；不满足时原样透传，零额外开销。首选编码器失败自动用 `libx264` 重试。
 
-比较输入分段与 `mpdecimate` 输出的**视频帧数**，保留帧比例低于阈值即判定为静态并丢弃整段（不做帧级裁剪）。
+### 静态阈值默认 0.5
 
-### 合并策略
+**v2 默认值较激进**：保留帧比例低于 50% 判定为静态。如果发现"有用内容被丢"，请在「运行配置」把 `static_threshold` 调低到 0.2 或 0.1。
 
-分段编码参数一致 → concat demuxer + `-c copy`；不一致 → concat filter 重编码。失败自动降级，仍失败标记 `merge_failed`。
+### 输出命名规则
 
-### 清理安全边界
+| 场景 | 输出 |
+|---|---|
+| 单段 | `output/{stem}_anonymized.mp4` |
+| 多段 + 合并 | `output/{stem}_anonymized.mp4` |
+| 多段 + 不合并 | `output/{stem}_anonymized_0000.mp4` … `_NNNN.mp4` |
 
-清理器只删除 `workdir/{task_id}/` 下的文件。**input 源文件与 output 最终结果永不触碰**。清理失败写入 `error_logs(cleanup_failed)`，不阻塞终态。规则细节见 [PRD 3.7 中间文件清理](docs/PRD.md#37-中间文件清理)。
+### 中间文件清理
+
+任务成功后立即清理该 stem 在 `workdir/` 下的 `_prechecked`、`_compressed`、`_segments`、`_prechecked_segments`、`_compressed_segments`、`_anon_*.mp4`。失败保留供排查，定时 cleaner 按 `WORKDIR_MAX_AGE` 兜底清理。**源文件与最终输出永不删除、永不修改**。
 
 ---
 
@@ -252,56 +306,69 @@ docker compose up -d --build
 
 ### 新增一个处理阶段
 
-1. 在 `app/pipeline/` 下创建模块，暴露 `handle(item)` 与阶段常量。
-2. 在 `scheduler.py` 注册阶段与有界队列，定义上下游关系。
-3. 在 `db/models.py` 扩展 `segments.status` 枚举（如需要）。
-4. 补充 `error_logs` 的 `stage` / `error_type` 取值。
-5. 前端任务详情增加对应子状态展示。
+1. 在 `app/pipeline/` 下新建模块，暴露类似 `compress(input_path, workdir, settings, stem) -> Path` 的纯函数
+2. 在 `scheduler.py::_process` 插入该阶段：`task.status = "<状态>"` → `db.commit()` → `manager.broadcast(...)` → `asyncio.to_thread(...)`
+3. 在 `tasks.py` 的 `STATUS_LABELS` 加新状态文案（前端 `app.js`）
+4. 若前端需要状态筛选、进度映射、`RUNNING_STATUSES`，一并更新
+5. 在 `api/files.py::RUNNING_STATUSES` 加入新状态，让 input 文件在这个阶段显示"处理中"
+6. 若产生中间文件，在 `scheduler.py::_cleanup_intermediates` 补充清理模式
 
 ### FFmpeg 调用约定
 
-- 统一通过 `app/media/ffmpeg_utils.py` 封装：参数列表式调用（避免 shell 注入）、可配超时、`terminate → kill` 兜底、stderr 截取末 500 字符入错误记录。
-- 所有输出路径必须在 `workdir/{task_id}/` 下；工具函数内做路径校验。
+当前项目直接 `subprocess.run`，不使用 shell，参数以 list 传入：
+
+```python
+subprocess.run(["ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error", ...],
+               capture_output=True, text=True)
+```
+
+失败时把 `stderr[-500:]` 写进 `ErrorLog.message`。编码统一走 `app/core/hardware.py::encoder_args()`。
 
 ### 测试
 
-```bash
-pytest tests/unit -q
-```
-
-`tests/fixtures/` 建议包含：正常 H.264/AAC、仅音频不兼容（如 AMR）、视频不兼容、损坏文件、超短静态片段等样例。集成测试覆盖"分段重编码回退""静态判定""合并回退"三类兜底路径。
-
----
-
-## 路线图
-
-- [ ] 目录监听 + 就绪检查
-- [ ] ffprobe 预检与编码纠偏
-- [ ] 分段（含重编码回退）
-- [ ] 静态丢弃
-- [ ] video-privacy-blur 集成（马赛克/高斯模糊）
-- [ ] 合并（含 concat filter 回退）
-- [ ] 流水线调度与资源自适应
-- [ ] 中间文件清理
-- [ ] Web 前端：设置 / 任务 / 报错 / 统计
-- [ ] Docker 部署与恢复
-- [ ] 测试补齐与 CI
+当前仓库未包含 `tests/` 目录（PRD §11 路线图已标注）。集成测试建议覆盖：预检纠偏、压缩跳过与触发、静态判定、合并回退、`merge_enabled=False` 多段输出。
 
 ---
 
 ## 常见问题
 
-**Q：视频是 `.mp4` 后缀但处理报 "codec not supported in container"？**
-A：这是预检纠偏的典型场景，系统会自动将不兼容音频转 AAC。若仍失败，检查 `workdir` 下的预检日志与 `error_logs`。策略见 [PRD 3.2 输入预检](docs/PRD.md#32-输入预检编码兼容性纠偏)。
+**Q：任务失败，日志显示 `Could not open encoder before EOF / -22 Invalid argument`**
 
-**Q：分段时长与设置不一致？**
-A：`segment` muxer 配合流拷贝时切分点落在关键帧上，实际时长会有浮动。需要精确时长可评估启用 HLS 分段方案。说明见 [PRD 3.3 视频分段](docs/PRD.md#33-视频分段)。
+A：容器编译了 `h264_nvenc` 但 GPU 不可访问。`hardware.best_encoder()` 会自动回退到 `libx264`；`compress` 再失败时也会用 `libx264` 重试一次。如果仍失败，确认 `ffmpeg -encoders | grep libx264` 存在，并检查 `docker logs` 中"选用视频编码器"打印的是哪个。
 
-**Q：没有 GPU 能用吗？**
-A：可以。`--device auto` 会回退到 CPU，吞吐下降。建议在纯 CPU 且核心充足时把匿名化阶段 `max_workers` 调至 2（需评估内存）。
+**Q：output 目录没有文件，workdir 里有 `xxx_anon_0000.mp4`**
 
-**Q：失败任务的中间文件为何找不到？**
-A：默认清理。设置 `KEEP_FAILED_INTERMEDIATE=true` 可临时保留，路径会写入报错记录。规则见 [PRD 3.7 中间文件清理](docs/PRD.md#37-中间文件清理)。
+A：v1.1 起已修复（单段会 `shutil.move` 到 `output/`）。旧数据可手动 `mv` 到 `output/` 并更新数据库 `output_path`。
+
+**Q：并行处理两个视频时单任务耗时不降反升，总时间也没变少**
+
+A：耗时统计是端到端时间，含排队 + 资源竞争。视频匿名化是重计算任务，并行通常不缩短总时间，GPU 单卡并行更应设为 1：
+
+```bash
+-e MAX_WORKERS_PER_STAGE=1
+```
+
+**Q：上传后任务一直停留在 `queued`**
+
+A：`docker logs` 应能看到「资源水位偏高」；调高 `RESOURCE_CHECK_INTERVAL` 或降 `MAX_WORKERS_PER_STAGE`。
+
+**Q：修改运行配置后，正在跑的任务没有生效**
+
+A：设计如此。任务开始时读取配置，修改只影响之后入队的任务。
+
+**Q：分段时长与设置不一致**
+
+A：`segment` muxer 配合 `-c copy` 时切分点落在关键帧上，实际时长有浮动。需要精确时长需改用 HLS 分段（PRD 路线图）。
+
+**Q：静态丢弃把有用的缓慢运动视频丢了**
+
+A：`static_threshold` 默认 0.5 较激进。改为 0.2 或 0.1 即可缓解。
+
+---
+
+## 路线图
+
+见 [PRD 第 11 节](docs/PRD.md#11-风险与路线图)。近期优先级：子进程超时、磁盘水位保护、`stats_daily`、`error_logs.error_type`、非终态任务恢复。
 
 ---
 
@@ -315,4 +382,4 @@ A：默认清理。设置 `KEEP_FAILED_INTERMEDIATE=true` 可临时保留，路�
 
 ## 许可证
 
-待定（建议在正式发布前确定并补充 `LICENSE` 文件）。
+待定（正式发布前补充 `LICENSE` 文件）。
