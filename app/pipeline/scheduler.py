@@ -1,20 +1,23 @@
 import asyncio
 import logging
+import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 from app.core.config import (
-    OUTPUT_DIR, WORKDIR, MERGE_ENABLED,
+    OUTPUT_DIR, WORKDIR,
     MAX_WORKERS_PER_STAGE, QUEUE_MAXSIZE,
     RESOURCE_CHECK_INTERVAL,
 )
 from app.core.resources import resource_ok
+from app.core.runtime_settings import get_settings
 from app.db.session import SessionLocal
 from app.db.models import Task, Segment, ErrorLog
 from app.pipeline.precheck import precheck
 from app.pipeline.segment import segment
-from app.pipeline.static_detect import is_static
+from app.pipeline.static_detect import detect_static
 from app.pipeline.anonymize import anonymize
 from app.pipeline.merge import merge
 from app.ws.progress import manager
@@ -53,9 +56,7 @@ class PipelineScheduler:
         while self._running:
             if not resource_ok():
                 logger.warning("资源水位偏高，暂停取新任务")
-                await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
-            else:
-                await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
+            await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
 
     async def _worker(self):
         while self._running:
@@ -71,8 +72,12 @@ class PipelineScheduler:
             try:
                 await self._process(task_id)
             except Exception as e:
-                logger.exception("任务处理失败: %s", task_id)
-                self._mark_failed(task_id, "unknown", str(e))
+                # _process 内部已 mark_failed；这里再兜底一次，防止未知异常吞掉队列
+                logger.exception("任务处理异常: %s", task_id)
+                try:
+                    self._mark_failed(task_id, "unknown", str(e))
+                except Exception:
+                    logger.exception("兜底 mark_failed 失败: %s", task_id)
             finally:
                 self.queue.task_done()
 
@@ -83,7 +88,16 @@ class PipelineScheduler:
             db.close()
             return
 
+        stem: str = ""
+        success = False
+
         try:
+            settings = get_settings()
+
+            task.started_at = datetime.utcnow()
+            task.status = "prechecking"
+            db.commit()            
+
             source = Path(task.source_path)
             stem = source.stem
 
@@ -95,19 +109,17 @@ class PipelineScheduler:
             task.status = "segmenting"
             db.commit()
             await manager.broadcast({"task_id": task_id, "status": "segmenting"})
-            segments = await asyncio.to_thread(segment, prechecked, WORKDIR)
+            segments = await asyncio.to_thread(segment, prechecked, WORKDIR, settings)
 
             task.status = "static_checking"
             db.commit()
             await manager.broadcast({"task_id": task_id, "status": "static_checking"})
 
+            threshold = settings["static_threshold"]
             kept = []
             for idx, seg in enumerate(segments):
-                ratio = await asyncio.to_thread(
-                    __import__("app.pipeline.static_detect", fromlist=["detect_static"])
-                    .detect_static, seg
-                )
-                is_dropped = ratio < 0.5
+                ratio = await asyncio.to_thread(detect_static, seg)
+                is_dropped = ratio < threshold
                 db.add(Segment(
                     task_id=task_id, index=idx,
                     path=str(seg),
@@ -128,21 +140,35 @@ class PipelineScheduler:
             anonymized = []
             for i, seg in enumerate(kept):
                 out = WORKDIR / f"{stem}_anon_{i:04d}.mp4"
-                await asyncio.to_thread(anonymize, seg, out)
+                await asyncio.to_thread(anonymize, seg, out, settings)
                 anonymized.append(out)
 
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
-            if MERGE_ENABLED and len(anonymized) > 1:
+
+            if len(anonymized) == 1:
+                await asyncio.to_thread(shutil.move, str(anonymized[0]), str(final_output))
+            elif settings["merge_enabled"]:
                 task.status = "merging"
                 db.commit()
                 await manager.broadcast({"task_id": task_id, "status": "merging"})
                 await asyncio.to_thread(merge, anonymized, final_output, WORKDIR)
-            elif anonymized:
-                final_output = anonymized[0]
+            else:
+                logger.warning(
+                    "merge_enabled=False 且有 %d 段，全部输出到 output 目录（不做合并）",
+                    len(anonymized),
+                )
+                for i, src in enumerate(anonymized):
+                    dst = OUTPUT_DIR / f"{stem}_anonymized_{i:04d}.mp4"
+                    await asyncio.to_thread(shutil.move, str(src), str(dst))
+                final_output = OUTPUT_DIR / f"{stem}_anonymized_0000.mp4"
 
             task.status = "completed"
             task.output_path = str(final_output)
+            task.finished_at = datetime.utcnow()
             db.commit()
+
+            success = True
+
             await manager.broadcast({
                 "task_id": task_id, "status": "completed",
                 "output": str(final_output),
@@ -158,6 +184,12 @@ class PipelineScheduler:
             raise
         finally:
             db.close()
+            # 只在成功路径清理中间文件；清理失败不影响任务状态
+            if success and stem:
+                try:
+                    await asyncio.to_thread(_cleanup_intermediates, stem)
+                except Exception:
+                    logger.exception("清理中间文件异常: %s", stem)
 
     def _mark_failed(self, task_id: str, stage: str, message: str):
         db = SessionLocal()
@@ -167,7 +199,33 @@ class PipelineScheduler:
                 task.status = "failed"
                 task.error_message = message
                 task.retry_count = (task.retry_count or 0) + 1
+                task.finished_at = datetime.utcnow()
+                
             db.add(ErrorLog(task_id=task_id, stage=stage, message=message))
             db.commit()
         finally:
             db.close()
+
+
+def _cleanup_intermediates(stem: str):
+    """删除 workdir 中该视频的中间产物（不动共享的 concat_list.txt）。
+
+    precheck 是否修复会决定分段目录名，两种都覆盖：
+    - precheck 未修复：{stem}_segments/
+    - precheck 已修复：{stem}_prechecked_segments/
+    """
+    candidates: list[Path] = [
+        WORKDIR / f"{stem}_prechecked.mp4",
+        WORKDIR / f"{stem}_segments",
+        WORKDIR / f"{stem}_prechecked_segments",
+    ]
+    candidates.extend(WORKDIR.glob(f"{stem}_anon_*.mp4"))
+
+    for p in candidates:
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink()
+        except Exception as e:
+            logger.warning("清理中间文件失败: %s (%s)", p, e)

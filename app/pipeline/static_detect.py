@@ -1,7 +1,9 @@
+"""静态画面比例检测。"""
 import re
 import subprocess
 from pathlib import Path
-from app.core.config import STATIC_THRESHOLD, MPDECIMATE_FRAC
+
+from app.core.config import MPDECIMATE_FRAC
 
 
 def detect_static(segment_path: Path) -> float:
@@ -33,5 +35,8 @@ def detect_static(segment_path: Path) -> float:
     return kept / total if total else 1.0
 
 
-def is_static(segment_path: Path) -> bool:
-    return detect_static(segment_path) < STATIC_THRESHOLD
+def is_static(segment_path: Path, threshold: float | None = None) -> bool:
+    if threshold is None:
+        from app.core.runtime_settings import get_settings
+        threshold = float(get_settings()["static_threshold"])
+    return detect_static(segment_path) < threshold

@@ -5,7 +5,6 @@ from tenacity import (
     retry_if_exception_type,
 )
 from app.core.config import (
-    ANONYMIZE_FACE, ANONYMIZE_PLATE, BLUR_METHOD,
     BLUR_STRENGTH, PIXELATE_BLOCKS, ANONYMIZE_DEVICE,
     FACE_DETECTOR, MODELS_DIR, ANONYMIZE_MAX_RETRIES,
     ANONYMIZE_RETRY_BACKOFF,
@@ -16,22 +15,26 @@ class AnonymizeError(RuntimeError):
     pass
 
 
-def _build_args(input_path: Path, output_path: Path) -> list[str]:
+def _build_args(input_path: Path, output_path: Path, settings: dict) -> list[str]:
+    blur_method = settings["blur_method"]
+    anonymize_face = settings["anonymize_face"]
+    anonymize_plate = settings["anonymize_plate"]
+
     args = [
         "privacy-blur",
         "--input", str(input_path),
         "--output", str(output_path),
         "--device", ANONYMIZE_DEVICE,
-        "--method", BLUR_METHOD,
+        "--method", blur_method,
         "--blur-strength", str(BLUR_STRENGTH),
         #"--pixelate-blocks", str(PIXELATE_BLOCKS),
     ]
-    if not ANONYMIZE_PLATE:
+    if not anonymize_plate:
         args.append("--no-blur-plates")
     else:
         args += ["--plate-weights", str(MODELS_DIR / "license_plate_detector.pt")]
 
-    if not ANONYMIZE_FACE:
+    if not anonymize_face:
         args.append("--no-blur-faces")
     elif FACE_DETECTOR == "yolo":
         args += [
@@ -47,8 +50,12 @@ def _build_args(input_path: Path, output_path: Path) -> list[str]:
     retry=retry_if_exception_type(AnonymizeError),
     reraise=True,
 )
-def anonymize(input_path: Path, output_path: Path):
-    args = _build_args(input_path, output_path)
+def anonymize(input_path: Path, output_path: Path, settings: dict | None = None):
+    if settings is None:
+        from app.core.runtime_settings import get_settings
+        settings = get_settings()
+
+    args = _build_args(input_path, output_path, settings)
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
         raise AnonymizeError(

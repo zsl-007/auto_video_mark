@@ -14,7 +14,7 @@ from app.pipeline.scheduler import PipelineScheduler
 from app.pipeline.watcher import start_watcher
 from app.pipeline.cleaner import cleaner_loop
 from app.ws.progress import manager
-from app.api import tasks, errors, stats, settings, upload
+from app.api import tasks, errors, stats, settings, upload, files
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ app.include_router(errors.router)
 app.include_router(stats.router)
 app.include_router(settings.router)
 app.include_router(upload.router)
+app.include_router(files.router)
 
 @app.websocket("/ws/progress")
 async def ws_progress(websocket: WebSocket):
