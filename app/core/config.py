@@ -14,8 +14,9 @@ DB_PATH = DB_DIR / "video_anonymizer.db"
 SEGMENT_DURATION = int(os.getenv("SEGMENT_DURATION", "600"))
 SEGMENT_ENABLED = os.getenv("SEGMENT_ENABLED", "true").lower() == "true"
 
-# 静态检测
-STATIC_THRESHOLD = float(os.getenv("STATIC_THRESHOLD", "0.5"))
+# 静态处理
+STATIC_PROCESS_ENABLED = os.getenv("STATIC_PROCESS_ENABLED", "true").lower() == "true"
+STATIC_PROCESS_THRESHOLD = float(os.getenv("STATIC_PROCESS_THRESHOLD", "0.4"))
 MPDECIMATE_FRAC = os.getenv("MPDECIMATE_FRAC", "0.33")
 
 # 匿名化

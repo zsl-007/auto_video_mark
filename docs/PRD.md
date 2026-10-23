@@ -58,11 +58,13 @@
 
 分段产物在 `workdir/{stem}_segments/`（未压缩）或 `workdir/{stem}_compressed_segments/`（压缩后）。
 
-### 3.5 静态视频丢弃
+### 3.5 静态处理
 
-对每个分段计算 `detect_static(seg)`：用 `mpdecimate` 保留的帧数 / 总帧数得到 `frame_ratio`。若 `frame_ratio < static_threshold`（默认 **0.5**，即保留帧比例低于 50%）判定为静态，`Segment.status='dropped'`，不进入匿名化；否则 `status='kept'`。
+由 `static_process_enabled`（默认开启）控制。开启时，对每个分段计算 `process_static(seg)`（用 `mpdecimate` 保留的帧数 / 总帧数得到 `frame_ratio`）。若 `frame_ratio < static_process_threshold`（默认 **0.5**），判定为静态，`Segment.status='dropped'`，不进入匿名化；否则 `status='kept'`。
 
-> 注意：默认阈值 0.5 相当激进，缓慢运动视频可能被误判。若出现"有用内容被丢"，请通过「运行配置」调低 `static_threshold`（如 0.2）。
+关闭时：跳过 mpdecimate 与 count_frames（省去每段两次全解码），所有分段直接 `status='kept'`、`frame_ratio=NULL`，不进入 `static_processing` 状态，`segmenting` 直接流转到 `anonymizing`。
+
+> 注意：默认阈值 0.5 相当激进，缓慢运动视频可能被误判。若出现"有用内容被丢"，请通过「运行配置」调低 `static_process_threshold`（如 0.2）。
 
 ### 3.6 人脸/车牌匿名化
 

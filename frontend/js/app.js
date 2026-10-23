@@ -7,7 +7,7 @@
       prechecking: '预检中',
       compressing: '压缩中',
       segmenting: '分段中',
-      static_checking: '静态检测中',
+      static_processing: '静态处理中',
       anonymizing: '匿名化中',
       merging: '合并中',
       completed: '已完成',
@@ -15,11 +15,11 @@
     };
     const STATUS_PROGRESS = {
       queued: 0, prechecking: 10, compressing: 18, segmenting: 25,
-      static_checking: 40, anonymizing: 65, merging: 90,
+      static_processing: 40, anonymizing: 65, merging: 90,
       completed: 100, failed: 100,
     };
     const RUNNING_STATUSES = new Set([
-      'prechecking', 'compressing', 'segmenting', 'static_checking', 'anonymizing', 'merging',
+      'prechecking', 'compressing', 'segmenting', 'static_processing', 'anonymizing', 'merging',
     ]);
     const INPUT_FILE_STATUS = {
       unprocessed: { label: '未处理',   cls: 'pending'   },
@@ -30,7 +30,8 @@
     const EDITABLE_SETTINGS = [
       { key: 'segment_enabled',  type: 'boolean' },
       { key: 'segment_duration', type: 'number', min: 1, max: 7200, step: 1 },
-      { key: 'static_threshold', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'static_process_enabled',   type: 'boolean' },
+      { key: 'static_process_threshold', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'anonymize_face',   type: 'boolean' },
       { key: 'anonymize_plate',  type: 'boolean' },
       { key: 'blur_method',      type: 'select', options: [
@@ -42,15 +43,16 @@
       { key: 'min_resolution',   type: 'number', min: 144, max: 2160, step: 1 },
     ];
     const SETTING_LABELS = {
-      segment_duration: { label: '分段时长', fmt: v => `${v} 秒` },
+      video_compress_enabled: { label: '启用视频压缩', fmt: v => v ? '开启' : '关闭' },
+      min_resolution: { label: '目标分辨率', fmt: v => `${v}p` },
       segment_enabled: { label: '启用分段', fmt: v => v ? '是' : '否' },
-      static_threshold: { label: '静态阈值', fmt: v => v },
+      segment_duration: { label: '分段时长', fmt: v => `${v} 秒` },
+      static_process_enabled: { label: '启用静态处理', fmt: v => v ? '开启' : '关闭' },
+      static_process_threshold: { label: '静态处理阈值', fmt: v => v },
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
       anonymize_plate: { label: '车牌匿名化', fmt: v => v ? '开启' : '关闭' },
       blur_method: { label: '模糊方式', fmt: v => v === 'pixelate' ? '马赛克' : '高斯模糊' },
       merge_enabled: { label: '启用合并', fmt: v => v ? '是' : '否' },
-      video_compress_enabled: { label: '启用视频压缩', fmt: v => v ? '开启' : '关闭' },
-      min_resolution: { label: '目标分辨率', fmt: v => `${v}p` },
       max_upload_size: { label: '最大上传', fmt: v => formatBytes(v) },
       supported_extensions: { label: '支持格式', fmt: v => (v || []).map(e => e.replace('.', '').toUpperCase()).join(' / ') },
     };
@@ -511,6 +513,18 @@
   
       document.getElementById('settings-cancel-btn').addEventListener('click', exitSettingsEdit);
       document.getElementById('settings-save-btn').addEventListener('click', saveSettingsForm);
+
+      // 静态处理开关联动阈值输入
+      const spSwitch = els.settingsList.querySelector('[data-key="static_process_enabled"]');
+      const spThreshold = els.settingsList.querySelector('[data-key="static_process_threshold"]');
+      if (spSwitch && spThreshold) {
+        const sync = () => {
+          spThreshold.disabled = !spSwitch.checked;
+          spThreshold.style.opacity = spSwitch.checked ? '1' : '.5';
+        };
+        spSwitch.addEventListener('change', sync);
+        sync();
+      }      
     }
     function enterSettingsEdit() {
       if (settingsEditing) return;

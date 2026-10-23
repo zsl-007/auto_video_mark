@@ -18,7 +18,7 @@ from app.db.models import Task, Segment, ErrorLog
 from app.pipeline.precheck import precheck
 from app.pipeline.compress import compress
 from app.pipeline.segment import segment
-from app.pipeline.static_detect import detect_static
+from app.pipeline.static_process import process_static
 from app.pipeline.anonymize import anonymize
 from app.pipeline.merge import merge
 from app.ws.progress import manager
@@ -117,32 +117,46 @@ class PipelineScheduler:
             await manager.broadcast({"task_id": task_id, "status": "segmenting"})
             segments = await asyncio.to_thread(segment, compressed, WORKDIR, settings)
 
-            task.status = "static_checking"
-            db.commit()
-            await manager.broadcast({"task_id": task_id, "status": "static_checking"})
-
-            threshold = settings["static_threshold"]
-            kept = []
-            for idx, seg in enumerate(segments):
-                ratio = await asyncio.to_thread(detect_static, seg)
-                is_dropped = ratio < threshold
-                db.add(Segment(
-                    task_id=task_id, index=idx,
-                    path=str(seg),
-                    status="dropped" if is_dropped else "kept",
-                    frame_ratio=ratio,
-                ))
+            if settings["static_process_enabled"]:
+                # 开启静态处理：逐段计算保留帧比例，低于阈值即丢弃
+                task.status = "static_processing"
                 db.commit()
-                if not is_dropped:
-                    kept.append(seg)
+                await manager.broadcast({"task_id": task_id, "status": "static_processing"})
 
-            if not kept:
-                raise RuntimeError("所有分段均为静态，无可用输出")
+                threshold = settings["static_process_threshold"]
+                kept = []
+                for idx, seg in enumerate(segments):
+                    ratio = await asyncio.to_thread(process_static, seg)
+                    is_dropped = ratio < threshold
+                    db.add(Segment(
+                        task_id=task_id, index=idx,
+                        path=str(seg),
+                        status="dropped" if is_dropped else "kept",
+                        frame_ratio=ratio,
+                    ))
+                    db.commit()
+                    if not is_dropped:
+                        kept.append(seg)
+
+                if not kept:
+                    raise RuntimeError("所有分段均为静态，无可用输出")
+            else:
+                # 关闭静态处理：所有分段直接保留，跳过 mpdecimate 与 count_frames
+                # 仍写 Segment 记录（frame_ratio=None），便于前端查看分段清单
+                kept = list(segments)
+                for idx, seg in enumerate(segments):
+                    db.add(Segment(
+                        task_id=task_id, index=idx,
+                        path=str(seg),
+                        status="kept",
+                        frame_ratio=None,
+                    ))
+                db.commit()
 
             task.status = "anonymizing"
             db.commit()
             await manager.broadcast({"task_id": task_id, "status": "anonymizing"})
-
+            
             anonymized = []
             for i, seg in enumerate(kept):
                 out = WORKDIR / f"{stem}_anon_{i:04d}.mp4"

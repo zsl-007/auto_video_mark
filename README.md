@@ -201,6 +201,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 |---|---|---|
 | 启用分段 | 是 | 关闭则整文件作为单段 |
 | 分段时长 | 600 秒 | 1–7200 |
+| 启用静态处理 | 是 | 关闭则跳过 mpdecimate 分析，所有分段直接进入匿名化 |
 | 静态阈值 | 0.5 | 0–1；保留帧比例低于该值判定静态 |
 | 人脸匿名化 | 是 | |
 | 车牌匿名化 | 是 | |
@@ -216,6 +217,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `BASE_DIR` | `/app` | 数据根目录 |
 | `SEGMENT_DURATION` | `600` | 分段时长（秒） |
 | `SEGMENT_ENABLED` | `true` | |
+| `STATIC_PROCESS_ENABLED` | `true` | 静态处理总开关 |
 | `STATIC_THRESHOLD` | `0.5` | |
 | `ANONYMIZE_FACE` | `true` | |
 | `ANONYMIZE_PLATE` | `true` | |

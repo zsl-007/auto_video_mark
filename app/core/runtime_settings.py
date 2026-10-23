@@ -28,7 +28,8 @@ _cache_mtime: float | None = None
 EDITABLE_KEYS = (
     "segment_enabled",
     "segment_duration",
-    "static_threshold",
+    "static_process_enabled",
+    "static_process_threshold",
     "anonymize_face",
     "anonymize_plate",
     "blur_method",
@@ -47,7 +48,8 @@ def _defaults() -> dict[str, Any]:
     return {
         "segment_enabled": bool(config.SEGMENT_ENABLED),
         "segment_duration": int(config.SEGMENT_DURATION),
-        "static_threshold": float(config.STATIC_THRESHOLD),
+        "static_process_enabled": bool(config.STATIC_PROCESS_ENABLED),
+        "static_process_threshold": float(config.STATIC_PROCESS_THRESHOLD),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "blur_method": str(config.BLUR_METHOD),
@@ -84,14 +86,17 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
             raise SettingsValidationError("segment_duration 须在 1–7200 秒之间")
         clean["segment_duration"] = v
 
-    if "static_threshold" in patch:
+    if "static_process_enabled" in patch:
+        clean["static_process_enabled"] = bool(patch["static_process_enabled"])
+
+    if "static_process_threshold" in patch:           # ← 改名
         try:
-            v = float(patch["static_threshold"])
+            v = float(patch["static_process_threshold"])
         except (TypeError, ValueError):
-            raise SettingsValidationError("static_threshold 必须是数字")
+            raise SettingsValidationError("static_process_threshold 必须是数字")
         if not (0.0 <= v <= 1.0):
-            raise SettingsValidationError("static_threshold 须在 0–1 之间")
-        clean["static_threshold"] = v
+            raise SettingsValidationError("static_process_threshold 须在 0–1 之间")
+        clean["static_process_threshold"] = v
 
     if "anonymize_face" in patch:
         clean["anonymize_face"] = bool(patch["anonymize_face"])
