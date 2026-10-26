@@ -19,6 +19,13 @@ from app.api import tasks, errors, stats, settings, upload, files
 setup_logging()
 logger = logging.getLogger(__name__)
 
+import sys
+from app.core.license import license_auth
+result_auth = license_auth()
+if result_auth['code'] != 1:
+    print(f"auth error:{result_auth['result']['message']}")
+    sys.exit()
+
 scheduler = PipelineScheduler()
 observer = None
 cleaner_task = None

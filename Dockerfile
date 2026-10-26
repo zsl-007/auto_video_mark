@@ -22,7 +22,13 @@ RUN pip install --no-cache-dir --default-timeout=100 --retries 5 -r requirements
 COPY app ./app
 COPY frontend ./frontend
 
+RUN rm ./app/main.py
+RUN rm ./app/core/license.py
+
 RUN mkdir -p /app/input /app/output /app/workdir /app/models /app/data
+
+# 创建授权文件目录（文件将在运行时挂载）
+RUN mkdir -p /app/license
 
 EXPOSE 8000
 

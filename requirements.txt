@@ -7,3 +7,5 @@ psutil==6.1.1
 tenacity==9.0.0
 #video-privacy-blur @ git+https://github.com/MengWoods/video-privacy-blur.git
 python-multipart==0.0.20
+cryptocode==0.1
+cryptography==46.0.3
