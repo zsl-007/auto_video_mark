@@ -45,3 +45,28 @@ def is_static_segment(segment_path: Path, threshold: float | None = None) -> boo
         from app.core.runtime_settings import get_settings
         threshold = float(get_settings()["static_process_threshold"])
     return process_static(segment_path) < threshold
+
+def drop_static_frames(segment_path: Path, output_path: Path) -> Path:
+    """用 mpdecimate + setpts 丢弃近似重复帧，输出时长缩短的无音频视频。
+
+    等价于：ffmpeg -i in.mp4 -vf "mpdecimate,setpts=N/FRAME_RATE/TB" -an out.mp4
+    - frac 使用 MPDECIMATE_FRAC（默认 0.33，与 ffmpeg 默认一致）
+    - 必须重编码；输出无音轨（-an）
+    - 失败时抛异常，由调用方回退到原分段
+    """
+    from app.core.hardware import encoder_args
+    cmd = [
+        "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-i", str(segment_path),
+        "-vf", f"mpdecimate=frac={MPDECIMATE_FRAC},setpts=N/FRAME_RATE/TB",
+        "-an",
+        *encoder_args(),
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"帧级去重失败: {result.stderr[-500:]}")
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError(f"帧级去重输出为空: {output_path}")
+    return output_path

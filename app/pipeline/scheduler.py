@@ -18,7 +18,7 @@ from app.db.models import Task, Segment, ErrorLog
 from app.pipeline.precheck import precheck
 from app.pipeline.compress import compress
 from app.pipeline.segment import segment
-from app.pipeline.static_process import process_static
+from app.pipeline.static_process import process_static, drop_static_frames
 from app.pipeline.anonymize import anonymize
 from app.pipeline.merge import merge
 from app.ws.progress import manager
@@ -118,31 +118,64 @@ class PipelineScheduler:
             segments = await asyncio.to_thread(segment, compressed, WORKDIR, settings)
 
             if settings["static_process_enabled"]:
-                # 开启静态处理：逐段计算保留帧比例，低于阈值即丢弃
                 task.status = "static_processing"
                 db.commit()
                 await manager.broadcast({"task_id": task_id, "status": "static_processing"})
 
                 threshold = settings["static_process_threshold"]
+                frame_drop = settings.get("static_frame_drop_enabled", False)
                 kept = []
+
                 for idx, seg in enumerate(segments):
                     ratio = await asyncio.to_thread(process_static, seg)
                     is_dropped = ratio < threshold
-                    db.add(Segment(
-                        task_id=task_id, index=idx,
-                        path=str(seg),
-                        status="dropped" if is_dropped else "kept",
-                        frame_ratio=ratio,
-                    ))
-                    db.commit()
-                    if not is_dropped:
+
+                    if is_dropped:
+                        db.add(Segment(
+                            task_id=task_id, index=idx,
+                            path=str(seg),
+                            status="dropped",
+                            frame_ratio=ratio,
+                        ))
+                        db.commit()
+                        continue
+
+                    if frame_drop:
+                        deduped = WORKDIR / f"{stem}_dedup_{idx:04d}.mp4"
+                        try:
+                            await asyncio.to_thread(drop_static_frames, seg, deduped)
+                            db.add(Segment(
+                                task_id=task_id, index=idx,
+                                path=str(deduped),
+                                status="kept",
+                                frame_ratio=ratio,
+                            ))
+                            db.commit()
+                            kept.append(deduped)
+                        except Exception as e:
+                            logger.warning("帧级去重失败，回退原分段: %s (%s)", seg, e)
+                            db.add(Segment(
+                                task_id=task_id, index=idx,
+                                path=str(seg),
+                                status="kept",
+                                frame_ratio=ratio,
+                            ))
+                            db.commit()
+                            kept.append(seg)
+                    else:
+                        db.add(Segment(
+                            task_id=task_id, index=idx,
+                            path=str(seg),
+                            status="kept",
+                            frame_ratio=ratio,
+                        ))
+                        db.commit()
                         kept.append(seg)
 
                 if not kept:
                     raise RuntimeError("所有分段均为静态，无可用输出")
             else:
-                # 关闭静态处理：所有分段直接保留，跳过 mpdecimate 与 count_frames
-                # 仍写 Segment 记录（frame_ratio=None），便于前端查看分段清单
+                # 关闭静态处理（保持上一轮实现）
                 kept = list(segments)
                 for idx, seg in enumerate(segments):
                     db.add(Segment(
@@ -243,6 +276,7 @@ def _cleanup_intermediates(stem: str):
         WORKDIR / f"{stem}_compressed_segments",
     ]
     candidates.extend(WORKDIR.glob(f"{stem}_anon_*.mp4"))
+    candidates.extend(WORKDIR.glob(f"{stem}_dedup_*.mp4")) 
 
     for p in candidates:
         try:

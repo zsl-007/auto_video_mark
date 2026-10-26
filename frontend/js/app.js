@@ -32,6 +32,7 @@
       { key: 'segment_duration', type: 'number', min: 1, max: 7200, step: 1 },
       { key: 'static_process_enabled',   type: 'boolean' },
       { key: 'static_process_threshold', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'static_frame_drop_enabled', type: 'boolean' },
       { key: 'anonymize_face',   type: 'boolean' },
       { key: 'anonymize_plate',  type: 'boolean' },
       { key: 'blur_method',      type: 'select', options: [
@@ -48,7 +49,8 @@
       segment_enabled: { label: '启用分段', fmt: v => v ? '是' : '否' },
       segment_duration: { label: '分段时长', fmt: v => `${v} 秒` },
       static_process_enabled: { label: '启用静态处理', fmt: v => v ? '开启' : '关闭' },
-      static_process_threshold: { label: '静态处理阈值', fmt: v => v },
+      static_process_threshold: { label: '静态处理阈值(静态率高于阈值的段将丢弃)', fmt: v => v },
+      static_frame_drop_enabled: { label: '丢弃静态帧', fmt: v => v ? '开启（输出无音频）' : '关闭', },
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
       anonymize_plate: { label: '车牌匿名化', fmt: v => v ? '开启' : '关闭' },
       blur_method: { label: '模糊方式', fmt: v => v === 'pixelate' ? '马赛克' : '高斯模糊' },

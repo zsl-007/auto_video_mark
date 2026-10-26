@@ -20,6 +20,7 @@ class SettingsPatch(BaseModel):
     segment_duration: int | None = Field(default=None, ge=1, le=7200)
     static_process_enabled: bool | None = None
     static_process_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    static_frame_drop_enabled: bool | None = None
     anonymize_face: bool | None = None
     anonymize_plate: bool | None = None
     blur_method: str | None = Field(default=None, pattern="^(pixelate|gaussian)$")

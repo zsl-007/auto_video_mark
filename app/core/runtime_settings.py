@@ -30,6 +30,7 @@ EDITABLE_KEYS = (
     "segment_duration",
     "static_process_enabled",
     "static_process_threshold",
+    "static_frame_drop_enabled",
     "anonymize_face",
     "anonymize_plate",
     "blur_method",
@@ -50,6 +51,7 @@ def _defaults() -> dict[str, Any]:
         "segment_duration": int(config.SEGMENT_DURATION),
         "static_process_enabled": bool(config.STATIC_PROCESS_ENABLED),
         "static_process_threshold": float(config.STATIC_PROCESS_THRESHOLD),
+        "static_frame_drop_enabled": bool(config.STATIC_FRAME_DROP_ENABLED),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "blur_method": str(config.BLUR_METHOD),
@@ -98,6 +100,9 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
             raise SettingsValidationError("static_process_threshold 须在 0–1 之间")
         clean["static_process_threshold"] = v
 
+    if "static_frame_drop_enabled" in patch:
+        clean["static_frame_drop_enabled"] = bool(patch["static_frame_drop_enabled"])
+        
     if "anonymize_face" in patch:
         clean["anonymize_face"] = bool(patch["anonymize_face"])
 
