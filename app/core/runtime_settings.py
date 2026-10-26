@@ -47,6 +47,8 @@ class SettingsValidationError(ValueError):
 
 def _defaults() -> dict[str, Any]:
     return {
+        "video_compress_enabled": bool(config.VIDEO_COMPRESS_ENABLED),
+        "min_resolution": int(config.MIN_RESOLUTION),
         "segment_enabled": bool(config.SEGMENT_ENABLED),
         "segment_duration": int(config.SEGMENT_DURATION),
         "static_process_enabled": bool(config.STATIC_PROCESS_ENABLED),
@@ -56,8 +58,6 @@ def _defaults() -> dict[str, Any]:
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "blur_method": str(config.BLUR_METHOD),
         "merge_enabled": bool(config.MERGE_ENABLED),
-        "video_compress_enabled": bool(config.VIDEO_COMPRESS_ENABLED),
-        "min_resolution": int(config.MIN_RESOLUTION),
     }
 
 
@@ -102,7 +102,7 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
 
     if "static_frame_drop_enabled" in patch:
         clean["static_frame_drop_enabled"] = bool(patch["static_frame_drop_enabled"])
-        
+
     if "anonymize_face" in patch:
         clean["anonymize_face"] = bool(patch["anonymize_face"])
 

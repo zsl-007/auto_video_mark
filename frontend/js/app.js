@@ -28,6 +28,8 @@
       failed:      { label: '处理失败', cls: 'failed'    },
     };
     const EDITABLE_SETTINGS = [
+      { key: 'video_compress_enabled', type: 'boolean' },
+      { key: 'min_resolution',   type: 'number', min: 144, max: 2160, step: 1 },
       { key: 'segment_enabled',  type: 'boolean' },
       { key: 'segment_duration', type: 'number', min: 1, max: 7200, step: 1 },
       { key: 'static_process_enabled',   type: 'boolean' },
@@ -40,8 +42,6 @@
         { value: 'gaussian', label: '高斯模糊' },
       ]},
       { key: 'merge_enabled',    type: 'boolean' },
-      { key: 'video_compress_enabled', type: 'boolean' },
-      { key: 'min_resolution',   type: 'number', min: 144, max: 2160, step: 1 },
     ];
     const SETTING_LABELS = {
       video_compress_enabled: { label: '启用视频压缩', fmt: v => v ? '开启' : '关闭' },
