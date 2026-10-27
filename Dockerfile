@@ -13,11 +13,13 @@ COPY vendor/video-privacy-blur ./vendor/video-privacy-blur
 
 # 2. 从本地目录安装（会自动读取 pyproject.toml / setup.py 并安装其依赖）
 RUN pip install --no-cache-dir --default-timeout=100 \
-    ./vendor/video-privacy-blur
+    ./vendor/video-privacy-blur -i https://mirrors.aliyun.com/pypi/simple/
+#RUN pip install --default-timeout=100 ./vendor/video-privacy-blur -i https://mirrors.aliyun.com/pypi/simple/
 
 # 3. 再装项目其余依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir --default-timeout=100 --retries 5 -r requirements.txt
+RUN pip install --no-cache-dir --default-timeout=100 --retries 5 -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+#RUN pip install --default-timeout=100 --retries 5 -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 
 COPY app ./app
 COPY frontend ./frontend
@@ -32,4 +34,4 @@ RUN mkdir -p /app/license
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18000"]

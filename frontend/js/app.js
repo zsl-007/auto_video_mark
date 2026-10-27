@@ -293,7 +293,8 @@
         if (f.status && t.status !== f.status) return false;
         if (f.q) {
           const q = f.q.toLowerCase();
-          const hay = `${t.id} ${t.source_path || ''} ${t.output_path || ''}`.toLowerCase();
+          const outs = (t.output_files || []).join(' ');
+          const hay = `${t.id} ${t.source_path || ''} ${t.output_path || ''} ${outs}`.toLowerCase();
           if (!hay.includes(q)) return false;
         }
         if (!matchesTimeRange(t.created_at, f.timeRange)) return false;
@@ -323,14 +324,26 @@
       });
     }
     function renderTaskRow(task) {
-        const cls = statusClass(task.status);
-        const progress = STATUS_PROGRESS[task.status] ?? 0;
-        const outName = task.output_path ? basename(task.output_path) : '';
-        const download = task.output_path
-          ? `<a href="/output/${encodeURIComponent(outName)}" download
+      const cls = statusClass(task.status);
+      const progress = STATUS_PROGRESS[task.status] ?? 0;
+
+      // 多段输出：优先用后端返回的 output_files，老数据回退到 output_path
+        const outputFiles = (task.output_files && task.output_files.length)
+          ? task.output_files
+          : (task.output_path ? [basename(task.output_path)] : []);
+        let download;
+        if (outputFiles.length === 0) {
+          download = '<span class="muted">-</span>';
+        } else if (outputFiles.length === 1) {
+          download = `<a href="/output/${encodeURIComponent(outputFiles[0])}" download
                 class="file-name" title="下载输出文件"
-                onclick="event.stopPropagation()">${escapeHtml(outName)}</a>`
-          : '<span class="muted">-</span>';
+                onclick="event.stopPropagation()">${escapeHtml(outputFiles[0])}</a>`;
+        } else {
+          download = `<a href="/output/${encodeURIComponent(outputFiles[0])}" download
+                class="file-name" title="下载第 1 个（共 ${outputFiles.length} 个）"
+                onclick="event.stopPropagation()">${escapeHtml(outputFiles[0])}</a>
+              <span class="muted"> 等 ${outputFiles.length} 个</span>`;
+        }
     
         const duration = taskDuration(task);
         const queueWait = taskQueueWait(task);          // ← 只算一次
@@ -700,7 +713,18 @@
     }
     function renderDrawer(task, segments, taskErrors) {
       const cls = statusClass(task.status);
-      const outName = task.output_path ? basename(task.output_path) : '';
+
+      // 多段输出：优先用后端返回的 output_files，老数据回退到 output_path
+      const outputFiles = (task.output_files && task.output_files.length)
+        ? task.output_files
+        : (task.output_path ? [basename(task.output_path)] : []);
+      const outputFilesHtml = outputFiles.length === 0
+        ? '<span class="muted">-</span>'
+        : (outputFiles.length === 1
+            ? `<a href="/output/${encodeURIComponent(outputFiles[0])}" download>${escapeHtml(outputFiles[0])}</a>`
+            : `<ul class="output-file-list">${outputFiles.map(f =>
+                `<li><a href="/output/${encodeURIComponent(f)}" download>${escapeHtml(f)}</a></li>`
+              ).join('')}</ul>`);
 
       // 耗时拆分：总 = 排队 + 处理
         const duration = taskDuration(task);
@@ -747,9 +771,7 @@
           <dt>任务 ID</dt><dd class="mono">${escapeHtml(task.id)}</dd>
           <dt>状态</dt><dd><span class="badge ${cls}"><span class="dot"></span>${escapeHtml(STATUS_LABELS[task.status] || task.status)}</span></dd>
           <dt>源文件</dt><dd>${escapeHtml(task.source_path)}</dd>
-          <dt>输出文件</dt><dd>${outName
-            ? `<a href="/output/${encodeURIComponent(outName)}" download>${escapeHtml(outName)}</a>`
-            : '<span class="muted">-</span>'}</dd>
+          <dt>输出文件</dt><dd>${outputFilesHtml}</dd>
           <dt>创建时间</dt><dd>${escapeHtml(fmtAbsolute(task.created_at))}</dd>
           <dt>更新时间</dt><dd>${escapeHtml(fmtAbsolute(task.updated_at))}</dd>
           <dt>开始处理</dt><dd>${task.started_at ? escapeHtml(fmtAbsolute(task.started_at)) : '<span class="muted">-</span>'}</dd>

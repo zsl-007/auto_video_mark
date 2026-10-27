@@ -401,3 +401,15 @@ main { max-width: 1400px; margin: 0 auto; padding: 24px; display: flex; flex-dir
   .filters input[type="search"] { flex: 1; min-width: 0; }
   .kv { grid-template-columns: 90px 1fr; }
 }
+
+/* 详情抽屉：多输出文件列表 */
+.output-file-list {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.output-file-list li {
+  line-height: 1.9;
+  word-break: break-all;
+}
