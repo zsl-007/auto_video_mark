@@ -27,7 +27,10 @@ class SettingsPatch(BaseModel):
     merge_enabled: bool | None = None
     video_compress_enabled: bool | None = None
     min_resolution: int | None = Field(default=None, ge=144, le=2160)
-
+    anonymize_parallel_segments: int | None = Field(default=None, ge=1, le=16)
+    anonymize_batch_size: int | None = Field(default=None, ge=1, le=16)
+    anonymize_imgsz: int | None = Field(default=None, ge=320, le=1280)
+    gpu_mem_threshold: float | None = Field(default=None, ge=0.1, le=1.0)
 
 @router.get("")
 def get_settings() -> dict[str, Any]:

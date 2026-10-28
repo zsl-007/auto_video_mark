@@ -37,6 +37,10 @@ EDITABLE_KEYS = (
     "merge_enabled",
     "video_compress_enabled",
     "min_resolution",
+    "anonymize_parallel_segments",
+    "anonymize_batch_size",
+    "anonymize_imgsz",
+    "gpu_mem_threshold",    
 )
 ALLOWED_BLUR_METHODS = ("pixelate", "gaussian")
 
@@ -58,6 +62,10 @@ def _defaults() -> dict[str, Any]:
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "blur_method": str(config.BLUR_METHOD),
         "merge_enabled": bool(config.MERGE_ENABLED),
+        "anonymize_parallel_segments": int(config.ANONYMIZE_PARALLEL_SEGMENTS),
+        "anonymize_batch_size": int(config.ANONYMIZE_BATCH_SIZE),
+        "anonymize_imgsz": int(config.ANONYMIZE_IMGSZ),
+        "gpu_mem_threshold": float(config.GPU_MEM_THRESHOLD),        
     }
 
 
@@ -132,6 +140,44 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
             raise SettingsValidationError("min_resolution 须在 144–2160 之间")
         clean["min_resolution"] = v
 
+    if "anonymize_parallel_segments" in patch:
+        try:
+            v = int(patch["anonymize_parallel_segments"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("anonymize_parallel_segments 必须是整数")
+        if not (1 <= v <= 16):
+            raise SettingsValidationError("anonymize_parallel_segments 须在 1–16 之间")
+        clean["anonymize_parallel_segments"] = v
+
+    if "anonymize_batch_size" in patch:
+        try:
+            v = int(patch["anonymize_batch_size"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("anonymize_batch_size 必须是整数")
+        if not (1 <= v <= 16):
+            raise SettingsValidationError("anonymize_batch_size 须在 1–16 之间")
+        clean["anonymize_batch_size"] = v
+    
+    if "anonymize_imgsz" in patch:
+        try:
+            v = int(patch["anonymize_imgsz"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("anonymize_imgsz 必须是整数")
+        if not (320 <= v <= 1280):
+            raise SettingsValidationError("anonymize_imgsz 须在 320–1280 之间")
+        if v % 32 != 0:
+            raise SettingsValidationError("anonymize_imgsz 须为 32 的倍数（如 320/480/640/800/960/1280）")
+        clean["anonymize_imgsz"] = v
+
+    if "gpu_mem_threshold" in patch:
+        try:
+            v = float(patch["gpu_mem_threshold"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("gpu_mem_threshold 必须是数字")
+        if not (0.1 <= v <= 1.0):
+            raise SettingsValidationError("gpu_mem_threshold 须在 0.1–1.0 之间")
+        clean["gpu_mem_threshold"] = v
+        
     return clean
 
 def _read_override() -> dict[str, Any]:

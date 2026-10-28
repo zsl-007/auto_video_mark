@@ -32,13 +32,19 @@ class PipelineScheduler:
         self.workers: list[asyncio.Task] = []
         self._running = False
         self._resource_task: Optional[asyncio.Task] = None
+        self.gpu_sem: Optional[asyncio.Semaphore] = None
 
     async def start(self):
         self._running = True
+        settings = get_settings()
+        gpu_limit = max(1, int(settings.get("anonymize_parallel_segments", 2)))
+        self.gpu_sem = asyncio.Semaphore(gpu_limit)
+        logger.info("调度器已启动，worker 数: %d，GPU 并发上限: %d",
+                    MAX_WORKERS_PER_STAGE, gpu_limit)
+
         for _ in range(MAX_WORKERS_PER_STAGE):
             self.workers.append(asyncio.create_task(self._worker()))
         self._resource_task = asyncio.create_task(self._resource_monitor())
-        logger.info("调度器已启动，worker 数: %d", len(self.workers))
 
     async def stop(self):
         self._running = False
@@ -190,11 +196,25 @@ class PipelineScheduler:
             db.commit()
             await manager.broadcast({"task_id": task_id, "status": "anonymizing"})
             
-            anonymized = []
-            for i, seg in enumerate(kept):
-                out = WORKDIR / f"{stem}_anon_{i:04d}.mp4"
-                await asyncio.to_thread(anonymize, seg, out, settings)
-                anonymized.append(out)
+            async def _anon_one(idx: int, seg: Path):
+                out = WORKDIR / f"{stem}_anon_{idx:04d}.mp4"
+                async with self.gpu_sem:
+                    await asyncio.to_thread(anonymize, seg, out, settings)
+                return idx, out
+
+            logger.info("任务 %s 匿名化：%d 段，GPU 并发上限 %d",
+                        task_id, len(kept),
+                        self.gpu_sem._value if self.gpu_sem else 1)
+
+            results = await asyncio.gather(
+                *[_anon_one(i, s) for i, s in enumerate(kept)],
+                return_exceptions=True,
+            )
+            for r in results:
+                if isinstance(r, BaseException):
+                    raise r
+            results.sort(key=lambda x: x[0])
+            anonymized = [r[1] for r in results]
 
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
 

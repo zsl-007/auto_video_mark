@@ -62,3 +62,9 @@ STAGING_MAX_AGE = int(os.getenv("STAGING_MAX_AGE", "3600"))  # 默认 1 小时
 # 视频压缩（预检后、分段前，降低分辨率以加速后续处理）
 VIDEO_COMPRESS_ENABLED = os.getenv("VIDEO_COMPRESS_ENABLED", "true").lower() == "true"
 MIN_RESOLUTION = int(os.getenv("MIN_RESOLUTION", "480"))  # 目标像素高度，480 表示 480p
+
+# 匿名化（进程内实现）
+ANONYMIZE_IMGSZ = int(os.getenv("ANONYMIZE_IMGSZ", "640"))            # 640 适合 480p 压缩后视频
+ANONYMIZE_BATCH_SIZE = int(os.getenv("ANONYMIZE_BATCH_SIZE", "2"))    # 1=逐帧；4~8 更吃显存
+ANONYMIZE_PARALLEL_SEGMENTS = int(os.getenv("ANONYMIZE_PARALLEL_SEGMENTS", "4"))
+GPU_MEM_THRESHOLD = float(os.getenv("GPU_MEM_THRESHOLD", "0.85"))

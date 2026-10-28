@@ -9,3 +9,9 @@ tenacity==9.0.0
 python-multipart==0.0.20
 cryptocode==0.1
 cryptography==46.0.3
+#以下为video-privacy-blur移植入主程序后需要安装依赖
+ultralytics>=8.2.0
+opencv-python-headless>=4.8.0
+numpy>=1.24
+# torch 由 ultralytics 自动安装。如需 GPU，构建时追加：
+#   pip install torch --extra-index-url https://download.pytorch.org/whl/cu121

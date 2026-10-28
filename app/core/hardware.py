@@ -13,7 +13,7 @@ def _probe_cmd(encoder: str) -> list[str]:
     """用 0.1 秒的极短输入真实跑一次编码，验证运行时可用性。"""
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-f", "lavfi", "-i", "color=c=black:s=128x128:d=0.1",
+        "-f", "lavfi", "-i", "color=c=black:s=640x480:d=0.1",
         "-frames:v", "1",
         "-c:v", encoder,
     ]

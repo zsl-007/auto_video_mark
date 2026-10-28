@@ -45,3 +45,9 @@ frontend/.vite/
 *.log
 *.tmp
 *.pid
+
+# ===== lincense =====
+app/main.pyc
+app/main.pyc
+app/core/license.pyc
+app/core/license.py

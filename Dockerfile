@@ -9,11 +9,10 @@ RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debi
 WORKDIR /app
 
 # 1. 先拷入本地 video-privacy-blur 源码
-COPY vendor/video-privacy-blur ./vendor/video-privacy-blur
+#COPY vendor/video-privacy-blur ./vendor/video-privacy-blur
 
 # 2. 从本地目录安装（会自动读取 pyproject.toml / setup.py 并安装其依赖）
-RUN pip install --no-cache-dir --default-timeout=100 \
-    ./vendor/video-privacy-blur -i https://mirrors.aliyun.com/pypi/simple/
+#RUN pip install --no-cache-dir --default-timeout=100 ./vendor/video-privacy-blur -i https://mirrors.aliyun.com/pypi/simple/
 #RUN pip install --default-timeout=100 ./vendor/video-privacy-blur -i https://mirrors.aliyun.com/pypi/simple/
 
 # 3. 再装项目其余依赖

@@ -42,6 +42,10 @@
         { value: 'gaussian', label: '高斯模糊' },
       ]},
       { key: 'merge_enabled',    type: 'boolean' },
+      { key: 'anonymize_parallel_segments', type: 'number', min: 1, max: 16, step: 1 },
+      { key: 'anonymize_batch_size',        type: 'number', min: 1, max: 16, step: 1 },
+      { key: 'anonymize_imgsz',             type: 'number', min: 320, max: 1280, step: 32 },
+      { key: 'gpu_mem_threshold',           type: 'number', min: 0.1, max: 1, step: 0.01 },      
     ];
     const SETTING_LABELS = {
       video_compress_enabled: { label: '启用视频压缩', fmt: v => v ? '开启' : '关闭' },
@@ -57,6 +61,10 @@
       merge_enabled: { label: '启用合并', fmt: v => v ? '是' : '否' },
       max_upload_size: { label: '最大上传', fmt: v => formatBytes(v) },
       supported_extensions: { label: '支持格式', fmt: v => (v || []).map(e => e.replace('.', '').toUpperCase()).join(' / ') },
+      anonymize_parallel_segments: { label: '匿名化并行数（全局，重启生效）', fmt: v => `${v} 路` },
+      anonymize_batch_size: { label: '匿名化批大小（新任务生效）', fmt: v => `${v} 帧/批` },
+      anonymize_imgsz: { label: '匿名化推理尺寸（新任务生效）', fmt: v => `${v}px` },
+      gpu_mem_threshold: { label: 'GPU 显存水位阈值', fmt: v => `${(v * 100).toFixed(0)}%` },      
     };
     const HIDDEN_SETTING_KEYS = new Set(['input_dir', 'output_dir']);
   
