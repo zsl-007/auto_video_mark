@@ -9,6 +9,7 @@ WORKDIR = BASE_DIR / "workdir"
 MODELS_DIR = BASE_DIR / "models"
 DB_DIR = BASE_DIR / "data"
 DB_PATH = DB_DIR / "video_anonymizer.db"
+LICENSE_DIR = BASE_DIR / "license"
 
 # 分段
 SEGMENT_DURATION = int(os.getenv("SEGMENT_DURATION", "600"))
