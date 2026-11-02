@@ -2,6 +2,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
@@ -33,6 +36,13 @@ cleaner_task = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global observer, cleaner_task
+    
+    # 显式提高默认线程池，避免 asyncio.to_thread 受 cpu+4 上限约束
+    loop = asyncio.get_running_loop()
+    max_threads = int(os.getenv("ASYNCIO_THREADS", "32"))
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=max_threads))
+    logger.info("默认线程池上限: %d", max_threads)
+
     init_db()
     await scheduler.start()
 
@@ -41,7 +51,7 @@ async def lifespan(app: FastAPI):
     enc = await asyncio.to_thread(best_encoder)
     logger.info("视频编码器已就绪: %s", enc)
 
-    loop = asyncio.get_running_loop()
+    #loop = asyncio.get_running_loop()
     observer = start_watcher(scheduler, loop)
     cleaner_task = asyncio.create_task(cleaner_loop())
 

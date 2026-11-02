@@ -71,3 +71,32 @@ class FaceDetectorYOLO:
             else:
                 out.append([tuple(map(int, xy)) for xy in res.boxes.xyxy.cpu().numpy()])
         return out
+
+class TextDetectorYOLO:
+    """YOLOv8 场景文字检测器（yolov8s-text.pt）。"""
+
+    def __init__(self, weights: str, device: str = "cpu",
+                 conf: float = 0.25, imgsz: int = 960):
+        self.model = YOLO(weights)
+        self.device = device
+        self.conf = conf
+        self.imgsz = imgsz
+
+    def __call__(self, frame, imgsz=None):
+        return self.batch_call([frame], imgsz=imgsz)[0]
+
+    def batch_call(self, frames, imgsz=None):
+        if not frames:
+            return []
+        results = self.model(
+            frames, device=self.device, conf=self.conf,
+            imgsz=imgsz if imgsz is not None else self.imgsz,
+            verbose=False,
+        )
+        out = []
+        for res in results:
+            if res.boxes is None or len(res.boxes) == 0:
+                out.append([])
+            else:
+                out.append([tuple(map(int, xy)) for xy in res.boxes.xyxy.cpu().numpy()])
+        return out

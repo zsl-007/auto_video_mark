@@ -33,10 +33,15 @@ EDITABLE_KEYS = (
     "static_frame_drop_enabled",
     "anonymize_face",
     "anonymize_plate",
+    "anonymize_text",              # 新增文本检测 # 开关
+    "text_conf",                   # 新增文本检测 # 文字检测置信度
+    "text_iou_threshold",          # 新增文本检测 # 文字 NMS 阈值（越小越不易合并相邻文字）
+    "text_expand_scale",           # 新增文本检测 # 文字框扩张比例（文字框小，无需像车牌那样扩 1.35）
     "blur_method",
     "merge_enabled",
     "video_compress_enabled",
     "min_resolution",
+    "max_concurrent_tasks",             # 新增
     "anonymize_parallel_segments",
     "anonymize_batch_size",
     "anonymize_imgsz",
@@ -60,8 +65,13 @@ def _defaults() -> dict[str, Any]:
         "static_frame_drop_enabled": bool(config.STATIC_FRAME_DROP_ENABLED),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
+        "anonymize_text": bool(config.ANONYMIZE_TEXT),                     # 新增
+        "text_conf": float(config.TEXT_CONF),                              # 新增
+        "text_iou_threshold": float(config.TEXT_IOU_THRESHOLD),            # 新增
+        "text_expand_scale": float(config.TEXT_EXPAND_SCALE),              # 新增        
         "blur_method": str(config.BLUR_METHOD),
         "merge_enabled": bool(config.MERGE_ENABLED),
+        "max_concurrent_tasks": int(config.MAX_CONCURRENT_TASKS),   # 新增
         "anonymize_parallel_segments": int(config.ANONYMIZE_PARALLEL_SEGMENTS),
         "anonymize_batch_size": int(config.ANONYMIZE_BATCH_SIZE),
         "anonymize_imgsz": int(config.ANONYMIZE_IMGSZ),
@@ -117,6 +127,36 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
     if "anonymize_plate" in patch:
         clean["anonymize_plate"] = bool(patch["anonymize_plate"])
 
+    if "anonymize_text" in patch:
+        clean["anonymize_text"] = bool(patch["anonymize_text"])
+
+    if "text_conf" in patch:
+        try:
+            v = float(patch["text_conf"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("text_conf 必须是数字")
+        if not (0.01 <= v <= 1.0):
+            raise SettingsValidationError("text_conf 须在 0.01–1.0 之间")
+        clean["text_conf"] = v
+
+    if "text_iou_threshold" in patch:
+        try:
+            v = float(patch["text_iou_threshold"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("text_iou_threshold 必须是数字")
+        if not (0.01 <= v <= 1.0):
+            raise SettingsValidationError("text_iou_threshold 须在 0.01–1.0 之间")
+        clean["text_iou_threshold"] = v
+
+    if "text_expand_scale" in patch:
+        try:
+            v = float(patch["text_expand_scale"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("text_expand_scale 必须是数字")
+        if not (1.0 <= v <= 2.0):
+            raise SettingsValidationError("text_expand_scale 须在 1.0–2.0 之间")
+        clean["text_expand_scale"] = v
+        
     if "blur_method" in patch:
         v = str(patch["blur_method"])
         if v not in ALLOWED_BLUR_METHODS:
@@ -140,6 +180,15 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
             raise SettingsValidationError("min_resolution 须在 144–2160 之间")
         clean["min_resolution"] = v
 
+    if "max_concurrent_tasks" in patch:
+        try:
+            v = int(patch["max_concurrent_tasks"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("max_concurrent_tasks 必须是整数")
+        if not (1 <= v <= 16):
+            raise SettingsValidationError("max_concurrent_tasks 须在 1–16 之间")
+        clean["max_concurrent_tasks"] = v
+        
     if "anonymize_parallel_segments" in patch:
         try:
             v = int(patch["anonymize_parallel_segments"])

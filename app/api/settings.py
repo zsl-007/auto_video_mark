@@ -23,10 +23,15 @@ class SettingsPatch(BaseModel):
     static_frame_drop_enabled: bool | None = None
     anonymize_face: bool | None = None
     anonymize_plate: bool | None = None
+    anonymize_text: bool | None = None                                            # 新增
+    text_conf: float | None = Field(default=None, ge=0.01, le=1.0)                # 新增
+    text_iou_threshold: float | None = Field(default=None, ge=0.01, le=1.0)       # 新增
+    text_expand_scale: float | None = Field(default=None, ge=1.0, le=2.0)         # 新增    
     blur_method: str | None = Field(default=None, pattern="^(pixelate|gaussian)$")
     merge_enabled: bool | None = None
     video_compress_enabled: bool | None = None
     min_resolution: int | None = Field(default=None, ge=144, le=2160)
+    max_concurrent_tasks: int | None = Field(default=None, ge=1, le=16)
     anonymize_parallel_segments: int | None = Field(default=None, ge=1, le=16)
     anonymize_batch_size: int | None = Field(default=None, ge=1, le=16)
     anonymize_imgsz: int | None = Field(default=None, ge=320, le=1280)

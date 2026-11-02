@@ -11,6 +11,7 @@ from app.core.config import (
     MAX_WORKERS_PER_STAGE, QUEUE_MAXSIZE,
     RESOURCE_CHECK_INTERVAL,
 )
+
 from app.core.resources import resource_ok
 from app.core.runtime_settings import get_settings
 from app.db.session import SessionLocal
@@ -37,12 +38,13 @@ class PipelineScheduler:
     async def start(self):
         self._running = True
         settings = get_settings()
-        gpu_limit = max(1, int(settings.get("anonymize_parallel_segments", 2)))
+        gpu_limit = max(1, int(settings.get("anonymize_parallel_segments", 4)))
         self.gpu_sem = asyncio.Semaphore(gpu_limit)
-        logger.info("调度器已启动，worker 数: %d，GPU 并发上限: %d",
-                    MAX_WORKERS_PER_STAGE, gpu_limit)
+        max_tasks = max(1, int(settings.get("max_concurrent_tasks", MAX_WORKERS_PER_STAGE)))
+        logger.info("调度器已启动，worker 数: %d，GPU 段级并发上限: %d",
+                    max_tasks, gpu_limit)
 
-        for _ in range(MAX_WORKERS_PER_STAGE):
+        for _ in range(max_tasks):
             self.workers.append(asyncio.create_task(self._worker()))
         self._resource_task = asyncio.create_task(self._resource_monitor())
 

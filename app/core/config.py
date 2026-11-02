@@ -30,11 +30,18 @@ PIXELATE_BLOCKS = int(os.getenv("PIXELATE_BLOCKS", "10"))
 ANONYMIZE_DEVICE = os.getenv("ANONYMIZE_DEVICE", "auto")     # auto | cpu | cuda | mps
 FACE_DETECTOR = os.getenv("FACE_DETECTOR", "yolo")           # haar | yolo
 
+# 文字匿名化（yolov8s-text.pt）
+ANONYMIZE_TEXT = os.getenv("ANONYMIZE_TEXT", "false").lower() == "true"
+TEXT_CONF = float(os.getenv("TEXT_CONF", "0.25"))            # 文字检测置信度
+TEXT_IOU_THRESHOLD = float(os.getenv("TEXT_IOU_THRESHOLD", "0.15"))  # 文字 NMS 阈值（越小越不易合并相邻文字）
+TEXT_EXPAND_SCALE = float(os.getenv("TEXT_EXPAND_SCALE", "1.15"))    # 文字框扩张比例（文字框小，无需像车牌那样扩 1.35）
+
 # 合并
 MERGE_ENABLED = os.getenv("MERGE_ENABLED", "true").lower() == "true"
 
 # 资源
-MAX_WORKERS_PER_STAGE = int(os.getenv("MAX_WORKERS_PER_STAGE", "2"))
+MAX_WORKERS_PER_STAGE = int(os.getenv("MAX_WORKERS_PER_STAGE", "4"))
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", str(MAX_WORKERS_PER_STAGE)))
 QUEUE_MAXSIZE = int(os.getenv("QUEUE_MAXSIZE", "20"))
 RESOURCE_CHECK_INTERVAL = int(os.getenv("RESOURCE_CHECK_INTERVAL", "10"))
 

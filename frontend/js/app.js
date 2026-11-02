@@ -37,11 +37,16 @@
       { key: 'static_frame_drop_enabled', type: 'boolean' },
       { key: 'anonymize_face',   type: 'boolean' },
       { key: 'anonymize_plate',  type: 'boolean' },
+      { key: 'anonymize_text',      type: 'boolean' },                       // 新增
+      { key: 'text_conf',           type: 'number', min: 0.01, max: 1,   step: 0.01 },  // 新增
+      { key: 'text_iou_threshold',  type: 'number', min: 0.01, max: 1,   step: 0.01 },  // 新增
+      { key: 'text_expand_scale',   type: 'number', min: 1,    max: 2,   step: 0.05 },  // 新增      
       { key: 'blur_method',      type: 'select', options: [
         { value: 'pixelate', label: '马赛克' },
         { value: 'gaussian', label: '高斯模糊' },
       ]},
       { key: 'merge_enabled',    type: 'boolean' },
+      { key: 'max_concurrent_tasks', type: 'number', min: 1, max: 16, step: 1 },  // 新增
       { key: 'anonymize_parallel_segments', type: 'number', min: 1, max: 16, step: 1 },
       { key: 'anonymize_batch_size',        type: 'number', min: 1, max: 16, step: 1 },
       { key: 'anonymize_imgsz',             type: 'number', min: 320, max: 1280, step: 32 },
@@ -57,11 +62,16 @@
       static_frame_drop_enabled: { label: '丢弃静态帧', fmt: v => v ? '开启（输出无音频）' : '关闭', },
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
       anonymize_plate: { label: '车牌匿名化', fmt: v => v ? '开启' : '关闭' },
+      anonymize_text: { label: '文字匿名化', fmt: v => v ? '开启' : '关闭' },                                    // 新增
+      text_conf: { label: '文字检测置信度（越低越敏感）', fmt: v => v },                                         // 新增
+      text_iou_threshold: { label: '文字 NMS 阈值（越低越不易合并相邻文字）', fmt: v => v },                     // 新增
+      text_expand_scale: { label: '文字框扩张比例', fmt: v => `${v}×` },                                        // 新增      
       blur_method: { label: '模糊方式', fmt: v => v === 'pixelate' ? '马赛克' : '高斯模糊' },
       merge_enabled: { label: '启用合并', fmt: v => v ? '是' : '否' },
       max_upload_size: { label: '最大上传', fmt: v => formatBytes(v) },
       supported_extensions: { label: '支持格式', fmt: v => (v || []).map(e => e.replace('.', '').toUpperCase()).join(' / ') },
-      anonymize_parallel_segments: { label: '匿名化并行数（全局，重启生效）', fmt: v => `${v} 路` },
+      max_concurrent_tasks: { label: '同时处理任务数（全局，重启生效）', fmt: v => `${v} 个` },   // 新增
+      anonymize_parallel_segments: { label: '匿名化段级并发数（全局，重启生效）', fmt: v => `${v} 段` }, // 改措辞      
       anonymize_batch_size: { label: '匿名化批大小（新任务生效）', fmt: v => `${v} 帧/批` },
       anonymize_imgsz: { label: '匿名化推理尺寸（新任务生效）', fmt: v => `${v}px` },
       gpu_mem_threshold: { label: 'GPU 显存水位阈值', fmt: v => `${(v * 100).toFixed(0)}%` },      

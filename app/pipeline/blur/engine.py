@@ -17,7 +17,7 @@ import cv2
 from app.core.config import (
     ANONYMIZE_DEVICE, BLUR_STRENGTH, FACE_DETECTOR, MODELS_DIR,
 )
-from .detectors import PlateDetectorYOLO, FaceDetectorHaar, FaceDetectorYOLO
+from .detectors import PlateDetectorYOLO, FaceDetectorHaar, FaceDetectorYOLO, TextDetectorYOLO
 from .blur_ops import gaussian_inplace, pixelate_inplace
 from .utils import choose_device, expand_box, nms_merge
 
@@ -27,16 +27,17 @@ _tls = threading.local()
 
 
 class _DetectorBundle:
-    __slots__ = ("plate_detector", "face_detector", "face_is_yolo")
+    __slots__ = ("plate_detector", "face_detector", "face_is_yolo", "text_detector")
 
-    def __init__(self, plate_detector, face_detector, face_is_yolo):
+    def __init__(self, plate_detector, face_detector, face_is_yolo, text_detector=None):
         self.plate_detector = plate_detector
         self.face_detector = face_detector
         self.face_is_yolo = face_is_yolo
+        self.text_detector = text_detector
 
 
-def _build_detectors(plate_weights, face_weights, device, conf,
-                     use_plate, use_face, face_backend) -> _DetectorBundle:
+def _build_detectors(plate_weights, face_weights, text_weights, device, conf,
+                     use_plate, use_face, face_backend, use_text, text_conf):
     plate_detector = PlateDetectorYOLO(plate_weights, device, conf) if use_plate else None
     face_detector = None
     face_is_yolo = False
@@ -46,7 +47,10 @@ def _build_detectors(plate_weights, face_weights, device, conf,
             face_is_yolo = True
         else:
             face_detector = FaceDetectorHaar()
-    return _DetectorBundle(plate_detector, face_detector, face_is_yolo)
+    text_detector = (
+        TextDetectorYOLO(text_weights, device, text_conf) if use_text else None
+    )
+    return _DetectorBundle(plate_detector, face_detector, face_is_yolo, text_detector)
 
 
 def _get_detectors(cache_key, factory) -> _DetectorBundle:
@@ -78,6 +82,12 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     blur_method = settings["blur_method"]
     anonymize_face = bool(settings["anonymize_face"])
     anonymize_plate = bool(settings["anonymize_plate"])
+    anonymize_text = bool(settings.get("anonymize_text", False))
+    text_conf = float(settings.get("text_conf", getattr(cfg, "TEXT_CONF", 0.25)))
+    text_iou_threshold = float(settings.get("text_iou_threshold",
+                                            getattr(cfg, "TEXT_IOU_THRESHOLD", 0.15)))
+    text_expand_scale = float(settings.get("text_expand_scale",
+                                           getattr(cfg, "TEXT_EXPAND_SCALE", 1.15)))
     device = choose_device(ANONYMIZE_DEVICE)
 
     conf = 0.35
@@ -85,17 +95,21 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     blur_strength = float(BLUR_STRENGTH)
     plate_weights = str(MODELS_DIR / "license_plate_detector.pt")
     face_weights = str(MODELS_DIR / "yolov8n-face.pt")
+    text_weights = str(MODELS_DIR / "yolov8s-text.pt")
 
-    # 注意：imgsz 不进 cache_key，模型加载与 imgsz 解耦
+    # text_conf 只在启用文字匿名化时进 cache_key，避免未启用时无谓重载模型
     cache_key = (
-        plate_weights, face_weights, device, conf,
+        plate_weights, face_weights, text_weights, device, conf,
         anonymize_plate, anonymize_face, FACE_DETECTOR,
+        anonymize_text,
+        text_conf if anonymize_text else None,
     )
 
     def factory():
         return _build_detectors(
-            plate_weights, face_weights, device, conf,
+            plate_weights, face_weights, text_weights, device, conf,
             anonymize_plate, anonymize_face, FACE_DETECTOR,
+            anonymize_text, text_conf,
         )
 
     bundle = _get_detectors(cache_key, factory)
@@ -132,7 +146,13 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
         else:
             face_boxes = [[] for _ in range(n)]
 
+        if bundle.text_detector is not None:
+            text_boxes = bundle.text_detector.batch_call(frame_buffer, imgsz=imgsz)
+        else:
+            text_boxes = [[] for _ in range(n)]
+
         for i, frame in enumerate(frame_buffer):
+            # 车牌 + 人脸：保持原有 NMS 与扩展逻辑不变
             boxes = plate_boxes[i] + face_boxes[i]
             boxes = nms_merge(boxes, iou_thresh=0.5)
             for (x1, y1, x2, y2) in boxes:
@@ -141,6 +161,17 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
                     gaussian_inplace(frame, x1, y1, x2, y2, blur_strength)
                 else:
                     pixelate_inplace(frame, x1, y1, x2, y2)
+
+            # 文字：独立 NMS 阈值 + 独立扩展比例，避免被车牌/人脸框合并造成过度模糊
+            if text_boxes[i]:
+                t_boxes = nms_merge(text_boxes[i], iou_thresh=text_iou_threshold)
+                for (x1, y1, x2, y2) in t_boxes:
+                    x1, y1, x2, y2 = expand_box(x1, y1, x2, y2, text_expand_scale, W, H)
+                    if blur_method == "gaussian":
+                        gaussian_inplace(frame, x1, y1, x2, y2, blur_strength)
+                    else:
+                        pixelate_inplace(frame, x1, y1, x2, y2)
+
             writer.write(frame)
         frame_buffer.clear()
 
