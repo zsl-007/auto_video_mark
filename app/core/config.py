@@ -30,6 +30,10 @@ PIXELATE_BLOCKS = int(os.getenv("PIXELATE_BLOCKS", "10"))
 ANONYMIZE_DEVICE = os.getenv("ANONYMIZE_DEVICE", "auto")     # auto | cpu | cuda | mps
 FACE_DETECTOR = os.getenv("FACE_DETECTOR", "yolo")           # haar | yolo
 
+# 人脸匿名化增强
+FACE_BLUR_STRENGTH = int( os.getenv("FACE_BLUR_STRENGTH", "7"))
+FACE_EXPAND_SCALE = float( os.getenv("FACE_EXPAND_SCALE", "1.8"))
+
 # 文字匿名化（yolov8s-text.pt）
 ANONYMIZE_TEXT = os.getenv("ANONYMIZE_TEXT", "false").lower() == "true"
 TEXT_CONF = float(os.getenv("TEXT_CONF", "0.25"))            # 文字检测置信度
@@ -72,14 +76,14 @@ VIDEO_COMPRESS_ENABLED = os.getenv("VIDEO_COMPRESS_ENABLED", "true").lower() == 
 MIN_RESOLUTION = int(os.getenv("MIN_RESOLUTION", "480"))  # 目标像素高度，480 表示 480p
 
 # 匿名化（进程内实现）
-ANONYMIZE_IMGSZ = int(os.getenv("ANONYMIZE_IMGSZ", "640"))            # 640 适合 480p 压缩后视频
+ANONYMIZE_IMGSZ = int(os.getenv("ANONYMIZE_IMGSZ", "960"))            # 640 适合 480p 压缩后视频
 ANONYMIZE_BATCH_SIZE = int(os.getenv("ANONYMIZE_BATCH_SIZE", "2"))    # 1=逐帧；4~8 更吃显存
 ANONYMIZE_PARALLEL_SEGMENTS = int(os.getenv("ANONYMIZE_PARALLEL_SEGMENTS", "4"))
 GPU_MEM_THRESHOLD = float(os.getenv("GPU_MEM_THRESHOLD", "0.85"))
 
 # ByteTrack 多目标跟踪
 TRACKING_ENABLED = (os.getenv("TRACKING_ENABLED", "true").lower() == "true")
-TRACKING_TRACK_BUFFER = int(os.getenv("TRACKING_TRACK_BUFFER", "8"))
+TRACKING_TRACK_BUFFER = int(os.getenv("TRACKING_TRACK_BUFFER", "30"))
 TRACKING_HIGH_THRESH = float(os.getenv("TRACKING_HIGH_THRESH", "0.25"))
 TRACKING_LOW_THRESH = float(os.getenv("TRACKING_LOW_THRESH", "0.10"))
 TRACKING_NEW_TRACK_THRESH = float(os.getenv("TRACKING_NEW_TRACK_THRESH", "0.25"))

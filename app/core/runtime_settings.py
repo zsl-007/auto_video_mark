@@ -32,6 +32,8 @@ EDITABLE_KEYS = (
     "static_process_threshold",
     "static_frame_drop_enabled",
     "anonymize_face",
+    "face_blur_strength",
+    "face_expand_scale",    
     "anonymize_plate",
     "anonymize_text",              # 新增文本检测 # 开关
     "text_conf",                   # 新增文本检测 # 文字检测置信度
@@ -72,6 +74,8 @@ def _defaults() -> dict[str, Any]:
         "static_process_threshold": float(config.STATIC_PROCESS_THRESHOLD),
         "static_frame_drop_enabled": bool(config.STATIC_FRAME_DROP_ENABLED),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
+        "face_blur_strength": int(config.FACE_BLUR_STRENGTH),
+        "face_expand_scale": float(config.FACE_EXPAND_SCALE),        
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "anonymize_text": bool(config.ANONYMIZE_TEXT),                     # 新增
         "text_conf": float(config.TEXT_CONF),                              # 新增
@@ -139,6 +143,25 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
 
     if "anonymize_face" in patch:
         clean["anonymize_face"] = bool(patch["anonymize_face"])
+
+    if "face_blur_strength" in patch:
+        try:
+            v = int(patch["face_blur_strength"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError( "face_blur_strength 必须是整数" )
+        if not 1 <= v <= 10:
+            raise SettingsValidationError( "face_blur_strength 须在 1–10 之间" )
+        clean["face_blur_strength"] = v
+
+
+    if "face_expand_scale" in patch:
+        try:
+            v = float(patch["face_expand_scale"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError( "face_expand_scale 必须是数字" )
+        if not 1.0 <= v <= 2.5:
+            raise SettingsValidationError( "face_expand_scale 须在 1.0–2.5 之间" )
+        clean["face_expand_scale"] = v        
 
     if "anonymize_plate" in patch:
         clean["anonymize_plate"] = bool(patch["anonymize_plate"])

@@ -23,6 +23,28 @@ def expand_box(x1, y1, x2, y2, scale, W, H):
     nx2, ny2 = int(min(W - 1, cx + w2 / 2)), int(min(H - 1, cy + h2 / 2))
     return nx1, ny1, nx2, ny2
 
+def expand_face_box(x1, y1, x2, y2, scale, W, H):
+    """
+    扩大人脸匿名化范围：
+    - 左右对称扩张
+    - 上方扩张更多，覆盖头发和头顶
+    - 下方适度扩张
+    scale=1.8 表示最终宽高约为原检测框的 1.8 倍
+    """
+    w = max(1, x2 - x1)
+    h = max(1, y2 - y1)
+
+    extra_w = w * max(0.0, scale - 1.0)
+    extra_h = h * max(0.0, scale - 1.0)
+
+    nx1 = int(max(0, x1 - extra_w / 2))
+    nx2 = int(min(W, x2 + extra_w / 2))
+
+    # 额外高度的 75% 分配到头顶方向，25% 分配到下方
+    ny1 = int(max(0, y1 - extra_h * 0.75))
+    ny2 = int(min(H, y2 + extra_h * 0.25))
+
+    return nx1, ny1, nx2, ny2
 
 def iou(a, b):
     ax1, ay1, ax2, ay2 = a

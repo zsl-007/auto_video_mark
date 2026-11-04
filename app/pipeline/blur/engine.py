@@ -18,8 +18,9 @@ from app.core.config import (
     ANONYMIZE_DEVICE, BLUR_STRENGTH, FACE_DETECTOR, MODELS_DIR,
 )
 from .detectors import PlateDetectorYOLO, FaceDetectorHaar, FaceDetectorYOLO, TextDetectorYOLO
-from .blur_ops import gaussian_inplace, pixelate_inplace
-from .utils import choose_device, expand_box, nms_merge
+
+from .blur_ops import ( gaussian_inplace,  pixelate_inplace,  face_blur_inplace, )
+from .utils import ( choose_device, expand_box, expand_face_box, nms_merge,)
 
 from .tracking import UltralyticsByteTrack
 
@@ -103,7 +104,14 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
 
     conf = 0.35
     scale = 1.35
+    
     blur_strength = float(BLUR_STRENGTH)
+    # 人脸专用匿名化参数
+    face_blur_strength = int( settings.get( "face_blur_strength", getattr(cfg, "FACE_BLUR_STRENGTH", 7), ) )
+    face_expand_scale = float( settings.get( "face_expand_scale", getattr(cfg, "FACE_EXPAND_SCALE", 1.8), ) )
+    face_blur_strength = max(1, min(10, face_blur_strength))
+    face_expand_scale = max(1.0, min(2.5, face_expand_scale))    
+
     plate_weights = str(MODELS_DIR / "license_plate_detector.pt")
     face_weights = str(MODELS_DIR / "yolov8n-face.pt")
     text_weights = str(MODELS_DIR / "yolov8s-text.pt")
@@ -192,19 +200,31 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
             """兼容四列坐标和五列坐标（带 confidence）。"""
             return [tuple(map(int, box[:4])) for box in boxes]
 
-
-        def _blur_boxes(frame, boxes):
-            # 对框做合并，避免重叠区域重复模糊。
+        def _blur_boxes(frame, boxes, is_face=False):
+            """
+            车牌和人脸分别处理：
+            - 车牌继续使用原有扩框和模糊强度
+            - 人脸使用专用扩框和模糊强度
+            """
             boxes = nms_merge(boxes, iou_thresh=0.5)
 
             for x1, y1, x2, y2 in boxes:
-                x1, y1, x2, y2 = expand_box(x1, y1, x2, y2, scale, W, H)
 
-                if blur_method == "gaussian":
-                    gaussian_inplace(frame, x1, y1, x2, y2, blur_strength)
+                if is_face:
+                    # 人脸框重点向上扩张，覆盖头发和头顶
+                    x1, y1, x2, y2 = expand_face_box( x1, y1, x2, y2, face_expand_scale, W, H, )
+
+                    if blur_method in ("gaussian", "pixelate"):
+                        face_blur_inplace( frame, x1, y1, x2, y2, method=blur_method, strength=face_blur_strength, )
+
                 else:
-                    pixelate_inplace(frame, x1, y1, x2, y2)
+                    # 车牌保持原来的处理逻辑
+                    x1, y1, x2, y2 = expand_box( x1, y1, x2, y2, scale, W, H, )
 
+                    if blur_method == "gaussian":
+                        gaussian_inplace( frame, x1, y1, x2, y2, blur_strength, )
+                    else:
+                        pixelate_inplace( frame, x1, y1, x2, y2, )
 
         for i, frame in enumerate(frame_buffer):
             # --------------------------------------------------
@@ -229,7 +249,14 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
 
             # 人脸和车牌的跟踪状态互相独立。
             # 最后只合并匿名化区域，不合并跟踪身份。
-            _blur_boxes( frame, plate_regions + face_regions, )
+            #_blur_boxes( frame, plate_regions + face_regions, )
+            # 车牌独立处理
+            if plate_regions:
+                _blur_boxes( frame, plate_regions, is_face=False, )
+
+            # 人脸独立处理
+            if face_regions:
+                _blur_boxes( frame, face_regions, is_face=True, )            
 
             # --------------------------------------------------
             # 3. 文字匿名化保持独立

@@ -36,6 +36,8 @@
       { key: 'static_process_threshold', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'static_frame_drop_enabled', type: 'boolean' },
       { key: 'anonymize_face',   type: 'boolean' },
+      { key: 'face_blur_strength', type: 'number', min: 1, max: 10, step: 1 },
+      { key: 'face_expand_scale', type: 'number', min: 1, max: 2.5, step: 0.05 },
       { key: 'anonymize_plate',  type: 'boolean' },
       { key: 'anonymize_text',      type: 'boolean' },                       // 新增
       { key: 'text_conf',           type: 'number', min: 0.01, max: 1,   step: 0.01 },  // 新增
@@ -72,6 +74,8 @@
       static_process_threshold: { label: '静态处理阈值(静态率高于阈值的段将丢弃)', fmt: v => v },
       static_frame_drop_enabled: { label: '丢弃静态帧', fmt: v => v ? '开启（输出无音频）' : '关闭', },
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
+      face_blur_strength: { label: '人脸模糊强度（越大越模糊）', fmt: v => `${v} / 10`, },
+      face_expand_scale: { label: '人脸打码范围（包含头发）', fmt: v => `${Number(v).toFixed(2)}×`, },      
       anonymize_plate: { label: '车牌匿名化', fmt: v => v ? '开启' : '关闭' },
       anonymize_text: { label: '文字匿名化', fmt: v => v ? '开启' : '关闭' },                                    // 新增
       text_conf: { label: '文字检测置信度（越低越敏感）', fmt: v => v },                                         // 新增
