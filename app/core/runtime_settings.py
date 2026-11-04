@@ -45,7 +45,15 @@ EDITABLE_KEYS = (
     "anonymize_parallel_segments",
     "anonymize_batch_size",
     "anonymize_imgsz",
-    "gpu_mem_threshold",    
+    "gpu_mem_threshold", 
+    "tracking_enabled",
+    "tracking_track_buffer",
+    "tracking_high_thresh",
+    "tracking_low_thresh",
+    "tracking_new_track_thresh",
+    "tracking_match_thresh",
+    "tracking_smooth_alpha",
+    "tracking_predict_lost",       
 )
 ALLOWED_BLUR_METHODS = ("pixelate", "gaussian")
 
@@ -75,7 +83,15 @@ def _defaults() -> dict[str, Any]:
         "anonymize_parallel_segments": int(config.ANONYMIZE_PARALLEL_SEGMENTS),
         "anonymize_batch_size": int(config.ANONYMIZE_BATCH_SIZE),
         "anonymize_imgsz": int(config.ANONYMIZE_IMGSZ),
-        "gpu_mem_threshold": float(config.GPU_MEM_THRESHOLD),        
+        "gpu_mem_threshold": float(config.GPU_MEM_THRESHOLD),
+        "tracking_enabled": bool(config.TRACKING_ENABLED),
+        "tracking_track_buffer": int(config.TRACKING_TRACK_BUFFER),
+        "tracking_high_thresh": float(config.TRACKING_HIGH_THRESH),
+        "tracking_low_thresh": float(config.TRACKING_LOW_THRESH),
+        "tracking_new_track_thresh": float(config.TRACKING_NEW_TRACK_THRESH),
+        "tracking_match_thresh": float(config.TRACKING_MATCH_THRESH),
+        "tracking_smooth_alpha": float(config.TRACKING_SMOOTH_ALPHA),
+        "tracking_predict_lost": bool(config.TRACKING_PREDICT_LOST),                
     }
 
 
@@ -226,7 +242,32 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
         if not (0.1 <= v <= 1.0):
             raise SettingsValidationError("gpu_mem_threshold 须在 0.1–1.0 之间")
         clean["gpu_mem_threshold"] = v
-        
+
+    if "tracking_enabled" in patch:
+        clean["tracking_enabled"] = bool(patch["tracking_enabled"])
+
+    if "tracking_predict_lost" in patch:
+        clean["tracking_predict_lost"] = bool(patch["tracking_predict_lost"])
+
+    if "tracking_track_buffer" in patch:
+        v = int(patch["tracking_track_buffer"])
+        if not 1 <= v <= 120:
+            raise SettingsValidationError("tracking_track_buffer 须在 1–120 帧之间")
+        clean["tracking_track_buffer"] = v
+
+    for key in (
+        "tracking_high_thresh",
+        "tracking_low_thresh",
+        "tracking_new_track_thresh",
+        "tracking_match_thresh",
+        "tracking_smooth_alpha",
+    ):
+        if key in patch:
+            v = float(patch[key])
+            if not 0.0 <= v <= 1.0:
+                raise SettingsValidationError(f"{key} 须在 0–1 之间")
+            clean[key] = v
+
     return clean
 
 def _read_override() -> dict[str, Any]:

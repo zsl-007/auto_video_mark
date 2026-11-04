@@ -50,7 +50,18 @@
       { key: 'anonymize_parallel_segments', type: 'number', min: 1, max: 16, step: 1 },
       { key: 'anonymize_batch_size',        type: 'number', min: 1, max: 16, step: 1 },
       { key: 'anonymize_imgsz',             type: 'number', min: 320, max: 1280, step: 32 },
-      { key: 'gpu_mem_threshold',           type: 'number', min: 0.1, max: 1, step: 0.01 },      
+      { key: 'gpu_mem_threshold',           type: 'number', min: 0.1, max: 1, step: 0.01 },  
+
+      // ByteTrack 多目标跟踪
+      { key: 'tracking_enabled', type: 'boolean' },
+      { key: 'tracking_track_buffer', type: 'number', min: 1, max: 120, step: 1 },
+      { key: 'tracking_high_thresh', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'tracking_low_thresh', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'tracking_new_track_thresh', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'tracking_match_thresh', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'tracking_smooth_alpha', type: 'number', min: 0, max: 0.99, step: 0.01 },
+      { key: 'tracking_predict_lost', type: 'boolean' },
+
     ];
     const SETTING_LABELS = {
       video_compress_enabled: { label: '启用视频压缩', fmt: v => v ? '开启' : '关闭' },
@@ -74,7 +85,18 @@
       anonymize_parallel_segments: { label: '匿名化段级并发数（全局，重启生效）', fmt: v => `${v} 段` }, // 改措辞      
       anonymize_batch_size: { label: '匿名化批大小（新任务生效）', fmt: v => `${v} 帧/批` },
       anonymize_imgsz: { label: '匿名化推理尺寸（新任务生效）', fmt: v => `${v}px` },
-      gpu_mem_threshold: { label: 'GPU 显存水位阈值', fmt: v => `${(v * 100).toFixed(0)}%` },      
+      gpu_mem_threshold: { label: 'GPU 显存水位阈值', fmt: v => `${(v * 100).toFixed(0)}%` },   
+
+      // ByteTrack 多目标跟踪
+      tracking_enabled: { label: '启用多目标跟踪（ByteTrack）', fmt: v => v ? '开启' : '关闭' },
+      tracking_track_buffer: { label: '目标丢失保留帧数', fmt: v => `${v} 帧` },
+      tracking_high_thresh: { label: '跟踪高置信度阈值', fmt: v => Number(v).toFixed(2) },
+      tracking_low_thresh: { label: '跟踪低置信度阈值', fmt: v => Number(v).toFixed(2) },
+      tracking_new_track_thresh: { label: '新目标创建阈值', fmt: v => Number(v).toFixed(2) },
+      tracking_match_thresh: { label: '目标匹配阈值', fmt: v => Number(v).toFixed(2) },
+      tracking_smooth_alpha: { label: '跟踪框平滑系数', fmt: v => Number(v).toFixed(2) },
+      tracking_predict_lost: { label: '目标漏检时继续模糊', fmt: v => v ? '开启' : '关闭' },
+
     };
     const HIDDEN_SETTING_KEYS = new Set(['input_dir', 'output_dir']);
   
@@ -557,7 +579,28 @@
         };
         spSwitch.addEventListener('change', sync);
         sync();
-      }      
+      }
+
+      // 多目标跟踪开关联动
+      const trackingSwitch = els.settingsList.querySelector( '[data-key="tracking_enabled"]' );
+      const trackingKeys = [ 'tracking_track_buffer', 'tracking_high_thresh', 'tracking_low_thresh', 
+        'tracking_new_track_thresh', 'tracking_match_thresh', 'tracking_smooth_alpha', 'tracking_predict_lost',
+      ];
+      const trackingControls = trackingKeys
+        .map(key => els.settingsList.querySelector(`[data-key="${key}"]`))
+        .filter(Boolean);
+      if (trackingSwitch) {
+        const syncTracking = () => {
+          const enabled = trackingSwitch.checked;
+          trackingControls.forEach(control => {
+            control.disabled = !enabled;
+            control.style.opacity = enabled ? '1' : '.5';
+          });
+        };
+        trackingSwitch.addEventListener('change', syncTracking);
+        syncTracking();
+      }
+
     }
     function enterSettingsEdit() {
       if (settingsEditing) return;

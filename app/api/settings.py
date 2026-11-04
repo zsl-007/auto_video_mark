@@ -37,6 +37,15 @@ class SettingsPatch(BaseModel):
     anonymize_imgsz: int | None = Field(default=None, ge=320, le=1280)
     gpu_mem_threshold: float | None = Field(default=None, ge=0.1, le=1.0)
 
+    tracking_enabled: bool | None = None
+    tracking_track_buffer: int | None = Field(default=None, ge=1, le=120)
+    tracking_high_thresh: float | None = Field(default=None, ge=0.0, le=1.0)
+    tracking_low_thresh: float | None = Field(default=None, ge=0.0, le=1.0)
+    tracking_new_track_thresh: float | None = Field(default=None, ge=0.0, le=1.0)
+    tracking_match_thresh: float | None = Field(default=None, ge=0.0, le=1.0)
+    tracking_smooth_alpha: float | None = Field(default=None, ge=0.0, le=1.0)
+    tracking_predict_lost: bool | None = None
+
 @router.get("")
 def get_settings() -> dict[str, Any]:
     return runtime_settings.get_settings()

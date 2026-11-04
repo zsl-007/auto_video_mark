@@ -21,6 +21,8 @@ from .detectors import PlateDetectorYOLO, FaceDetectorHaar, FaceDetectorYOLO, Te
 from .blur_ops import gaussian_inplace, pixelate_inplace
 from .utils import choose_device, expand_box, nms_merge
 
+from .tracking import UltralyticsByteTrack
+
 logger = logging.getLogger(__name__)
 
 _tls = threading.local()
@@ -90,6 +92,15 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
                                            getattr(cfg, "TEXT_EXPAND_SCALE", 1.15)))
     device = choose_device(ANONYMIZE_DEVICE)
 
+    tracking_enabled = bool(settings.get("tracking_enabled", True))
+    tracking_track_buffer = int(settings.get("tracking_track_buffer", 8))
+    tracking_high_thresh = float(settings.get("tracking_high_thresh", 0.25))
+    tracking_low_thresh = float(settings.get("tracking_low_thresh", 0.10))
+    tracking_new_track_thresh = float(settings.get("tracking_new_track_thresh", 0.25))
+    tracking_match_thresh = float(settings.get("tracking_match_thresh", 0.8))
+    tracking_smooth_alpha = float(settings.get("tracking_smooth_alpha", 0.65))
+    tracking_predict_lost = bool(settings.get("tracking_predict_lost", True))
+
     conf = 0.35
     scale = 1.35
     blur_strength = float(BLUR_STRENGTH)
@@ -127,12 +138,37 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
         cap.release()
         raise RuntimeError(f"无法创建输出视频: {output_path}")
 
+    # 每个视频分段独立创建跟踪器。
+    # 人脸和车牌必须使用不同 tracker。
+    plate_tracker = None
+    face_tracker = None
+
+    tracker_kwargs = {
+        "track_buffer": tracking_track_buffer,
+        "high_thresh": tracking_high_thresh,
+        "low_thresh": tracking_low_thresh,
+        "new_track_thresh": tracking_new_track_thresh,
+        "match_thresh": tracking_match_thresh,
+        "smooth_alpha": tracking_smooth_alpha,
+        "predict_lost": tracking_predict_lost,
+    }
+
+    if tracking_enabled:
+        if bundle.plate_detector is not None:
+            plate_tracker = UltralyticsByteTrack(**tracker_kwargs)
+
+        # Haar 本身不是 YOLO 检测器，也可以用 ByteTrack 关联，
+        # 但第一版建议优先让 YOLO 人脸检测器启用跟踪。
+        if bundle.face_detector is not None:
+            face_tracker = UltralyticsByteTrack(**tracker_kwargs)
+
     frame_buffer: list = []
 
     def flush_batch():
         if not frame_buffer:
             return
         n = len(frame_buffer)
+
         if bundle.plate_detector is not None:
             plate_boxes = bundle.plate_detector.batch_call(frame_buffer, imgsz=imgsz)
         else:
@@ -149,31 +185,70 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
         if bundle.text_detector is not None:
             text_boxes = bundle.text_detector.batch_call(frame_buffer, imgsz=imgsz)
         else:
-            text_boxes = [[] for _ in range(n)]
+            text_boxes = [[] for _ in range(n)]            
 
-        for i, frame in enumerate(frame_buffer):
-            # 车牌 + 人脸：保持原有 NMS 与扩展逻辑不变
-            boxes = plate_boxes[i] + face_boxes[i]
+
+        def _coordinates(boxes):
+            """兼容四列坐标和五列坐标（带 confidence）。"""
+            return [tuple(map(int, box[:4])) for box in boxes]
+
+
+        def _blur_boxes(frame, boxes):
+            # 对框做合并，避免重叠区域重复模糊。
             boxes = nms_merge(boxes, iou_thresh=0.5)
-            for (x1, y1, x2, y2) in boxes:
+
+            for x1, y1, x2, y2 in boxes:
                 x1, y1, x2, y2 = expand_box(x1, y1, x2, y2, scale, W, H)
+
                 if blur_method == "gaussian":
                     gaussian_inplace(frame, x1, y1, x2, y2, blur_strength)
                 else:
                     pixelate_inplace(frame, x1, y1, x2, y2)
 
-            # 文字：独立 NMS 阈值 + 独立扩展比例，避免被车牌/人脸框合并造成过度模糊
+
+        for i, frame in enumerate(frame_buffer):
+            # --------------------------------------------------
+            # 1. 车牌检测 + 独立跟踪
+            # --------------------------------------------------
+            current_plate_boxes = plate_boxes[i]
+
+            if plate_tracker is not None:
+                current_plate_boxes = plate_tracker.update( current_plate_boxes, frame, )
+
+            plate_regions = _coordinates(current_plate_boxes)
+
+            # --------------------------------------------------
+            # 2. 人脸检测 + 独立跟踪
+            # --------------------------------------------------
+            current_face_boxes = face_boxes[i]
+
+            if face_tracker is not None:
+                current_face_boxes = face_tracker.update( current_face_boxes, frame, )
+
+            face_regions = _coordinates(current_face_boxes)
+
+            # 人脸和车牌的跟踪状态互相独立。
+            # 最后只合并匿名化区域，不合并跟踪身份。
+            _blur_boxes( frame, plate_regions + face_regions, )
+
+            # --------------------------------------------------
+            # 3. 文字匿名化保持独立
+            # --------------------------------------------------
             if text_boxes[i]:
-                t_boxes = nms_merge(text_boxes[i], iou_thresh=text_iou_threshold)
-                for (x1, y1, x2, y2) in t_boxes:
-                    x1, y1, x2, y2 = expand_box(x1, y1, x2, y2, text_expand_scale, W, H)
+                t_boxes = nms_merge( text_boxes[i], iou_thresh=text_iou_threshold, )
+
+                for x1, y1, x2, y2 in t_boxes:
+                    x1, y1, x2, y2 = expand_box( x1, y1, x2, y2, text_expand_scale, W, H, )
+
                     if blur_method == "gaussian":
-                        gaussian_inplace(frame, x1, y1, x2, y2, blur_strength)
+                        gaussian_inplace( frame, x1, y1, x2, y2, blur_strength, )
                     else:
-                        pixelate_inplace(frame, x1, y1, x2, y2)
+                        pixelate_inplace( frame, x1, y1, x2, y2, )
 
             writer.write(frame)
+
         frame_buffer.clear()
+
 
     try:
         while True:

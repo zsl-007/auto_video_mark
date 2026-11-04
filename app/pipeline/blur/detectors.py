@@ -15,21 +15,39 @@ class PlateDetectorYOLO:
     def __call__(self, frame, imgsz=None):
         return self.batch_call([frame], imgsz=imgsz)[0]
 
+
     def batch_call(self, frames, imgsz=None):
         if not frames:
             return []
+
         results = self.model(
-            frames, device=self.device, conf=self.conf,
+            frames,
+            device=self.device,
+            conf=self.conf,
             imgsz=imgsz if imgsz is not None else self.imgsz,
             verbose=False,
         )
+
         out = []
+
         for res in results:
             if res.boxes is None or len(res.boxes) == 0:
                 out.append([])
-            else:
-                out.append([tuple(map(int, xy)) for xy in res.boxes.xyxy.cpu().numpy()])
+                continue
+
+            xyxy = res.boxes.xyxy.cpu().numpy()
+            conf = res.boxes.conf.cpu().numpy()
+
+            frame_boxes = []
+
+            for box, score in zip(xyxy, conf):
+                x1, y1, x2, y2 = map(int, box)
+                frame_boxes.append((x1, y1, x2, y2, float(score)))
+
+            out.append(frame_boxes)
+
         return out
+
 
 
 class FaceDetectorHaar:
@@ -56,21 +74,40 @@ class FaceDetectorYOLO:
     def __call__(self, frame, imgsz=None) -> List[Tuple[int, int, int, int]]:
         return self.batch_call([frame], imgsz=imgsz)[0]
 
+
     def batch_call(self, frames, imgsz=None):
         if not frames:
             return []
+
         results = self.model(
-            frames, device=self.device, conf=self.conf,
+            frames,
+            device=self.device,
+            conf=self.conf,
             imgsz=imgsz if imgsz is not None else self.imgsz,
             verbose=False,
         )
+
         out = []
+
         for res in results:
             if res.boxes is None or len(res.boxes) == 0:
                 out.append([])
-            else:
-                out.append([tuple(map(int, xy)) for xy in res.boxes.xyxy.cpu().numpy()])
+                continue
+
+            xyxy = res.boxes.xyxy.cpu().numpy()
+            conf = res.boxes.conf.cpu().numpy()
+
+            frame_boxes = []
+
+            for box, score in zip(xyxy, conf):
+                x1, y1, x2, y2 = map(int, box)
+                frame_boxes.append((x1, y1, x2, y2, float(score)))
+
+            out.append(frame_boxes)
+
         return out
+
+
 
 class TextDetectorYOLO:
     """YOLOv8 场景文字检测器（yolov8s-text.pt）。"""

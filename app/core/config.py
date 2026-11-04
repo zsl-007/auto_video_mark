@@ -76,3 +76,13 @@ ANONYMIZE_IMGSZ = int(os.getenv("ANONYMIZE_IMGSZ", "640"))            # 640 适�
 ANONYMIZE_BATCH_SIZE = int(os.getenv("ANONYMIZE_BATCH_SIZE", "2"))    # 1=逐帧；4~8 更吃显存
 ANONYMIZE_PARALLEL_SEGMENTS = int(os.getenv("ANONYMIZE_PARALLEL_SEGMENTS", "4"))
 GPU_MEM_THRESHOLD = float(os.getenv("GPU_MEM_THRESHOLD", "0.85"))
+
+# ByteTrack 多目标跟踪
+TRACKING_ENABLED = (os.getenv("TRACKING_ENABLED", "true").lower() == "true")
+TRACKING_TRACK_BUFFER = int(os.getenv("TRACKING_TRACK_BUFFER", "8"))
+TRACKING_HIGH_THRESH = float(os.getenv("TRACKING_HIGH_THRESH", "0.25"))
+TRACKING_LOW_THRESH = float(os.getenv("TRACKING_LOW_THRESH", "0.10"))
+TRACKING_NEW_TRACK_THRESH = float(os.getenv("TRACKING_NEW_TRACK_THRESH", "0.25"))
+TRACKING_MATCH_THRESH = float(os.getenv("TRACKING_MATCH_THRESH", "0.8"))
+TRACKING_SMOOTH_ALPHA = float(os.getenv("TRACKING_SMOOTH_ALPHA", "0.65"))
+TRACKING_PREDICT_LOST = (os.getenv("TRACKING_PREDICT_LOST", "true").lower() == "true")
