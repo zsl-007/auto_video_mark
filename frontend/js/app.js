@@ -380,7 +380,34 @@
     }
     function renderTaskRow(task) {
       const cls = statusClass(task.status);
-      const progress = STATUS_PROGRESS[task.status] ?? 0;
+
+      const frameCurrent = Math.max(
+        0,
+        Number(task.frame_current) || 0
+      );
+
+      const frameTotal = Math.max(
+        0,
+        Number(task.frame_total) || 0
+      );
+
+      // 匿名化阶段使用真实帧进度计算进度条宽度
+      let progress = STATUS_PROGRESS[task.status] ?? 0;
+
+      if (
+        task.status === 'anonymizing' &&
+        frameTotal > 0
+      ) {
+        progress = Math.min(
+          100,
+          Math.round(frameCurrent / frameTotal * 100)
+        );
+      }
+
+      // 显示当前帧数 / 总帧数
+      const frameProgressText = frameTotal > 0
+        ? ` · ${frameCurrent.toLocaleString()} / ${frameTotal.toLocaleString()} 帧`
+        : '';    
 
       // 多段输出：优先用后端返回的 output_files，老数据回退到 output_path
         const outputFiles = (task.output_files && task.output_files.length)
@@ -415,7 +442,9 @@
               <div class="progress-bar">
                 <div class="progress-fill ${cls}" style="width:${progress}%"></div>
               </div>
-              <span class="progress-text">${progress}%</span>
+              <span class="progress-text">
+                ${progress}%${frameProgressText}
+              </span>
             </div>
           </td>
           <td>${download}</td>
@@ -741,7 +770,26 @@
           api('/api/tasks'),
           api('/api/stats/summary').catch(() => null),
         ]);
-        state.tasks = Array.isArray(tasks) ? tasks : [];
+
+        const previousTasks = new Map(
+          state.tasks.map(t => [t.id, t])
+        );
+
+        state.tasks = (Array.isArray(tasks) ? tasks : []).map(task => {
+          const previous = previousTasks.get(task.id);
+
+          return {
+            ...task,
+
+            // 后端未提供帧数时，保留当前页面已有进度
+            frame_current: task.frame_current ??
+              previous?.frame_current ?? 0,
+
+            frame_total: task.frame_total ??
+              previous?.frame_total ?? 0,
+          };
+        });        
+
         state.summary = summary;
         renderStats();
         renderTasks();
@@ -950,7 +998,36 @@
       }, 800);
     }
     function handleWsMessage(msg) {
-      if (!msg || !msg.task_id) { loadAll(); return; }
+
+        if (!msg || !msg.task_id) {
+          loadAll();
+          return;
+        }
+  
+        // --------------------------------------------------
+        // 视频帧处理进度消息
+        // 不重新请求 API，直接更新前端任务状态
+        // --------------------------------------------------
+        if (msg.event === 'frame_progress') {
+  
+          const task = state.tasks.find(
+            t => t.id === msg.task_id
+          );
+  
+          if (task) {
+            task.frame_current = Number(
+              msg.frame_current
+            ) || 0;
+  
+            task.frame_total = Number(
+              msg.frame_total
+            ) || 0;
+  
+            renderTasks();
+          }
+  
+          return;
+        }      
       const task = state.tasks.find(t => t.id === msg.task_id);
       if (msg.status === 'completed') {
         showToast(`任务完成：${task ? basename(task.source_path) : msg.task_id.slice(0, 8)}`, 'success');

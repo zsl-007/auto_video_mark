@@ -87,13 +87,13 @@ class AnonymizeError(RuntimeError):
     retry=retry_if_exception_type(AnonymizeError),
     reraise=True,
 )
-def anonymize(input_path: Path, output_path: Path, settings: dict | None = None):
+def anonymize( input_path: Path, output_path: Path, settings: dict | None = None, progress_callback=None,):
     if settings is None:
         from app.core.runtime_settings import get_settings
         settings = get_settings()
 
     try:
-        process_video(input_path, output_path, settings)
+        process_video(input_path,output_path,settings,progress_callback=progress_callback,)
     except Exception as e:
         # CUDA OOM 不可恢复，直接抛出避免无意义重试
         if "out of memory" in str(e).lower():

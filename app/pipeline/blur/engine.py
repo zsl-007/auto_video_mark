@@ -67,10 +67,8 @@ def _get_detectors(cache_key, factory) -> _DetectorBundle:
         logger.info("线程 %s 首次加载匿名化模型 key=%s",
                     threading.get_ident(), cache_key)
     return bundle
-
-
-def process_video(input_path: Path, output_path: Path, settings: dict,
-                  imgsz: int | None = None, batch_size: int | None = None):
+def process_video( input_path: Path, output_path: Path, settings: dict,
+                imgsz: int | None = None, batch_size: int | None = None, progress_callback=None,):
     """进程内完成一段视频的人脸/车牌模糊。"""
     from app.core import config as cfg
 
@@ -152,6 +150,11 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
 
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # 视频总帧数，仅读取一次元数据，不增加视频推理开销
+    total_frames = max( 0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) )
+    processed_frames = 0
+
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (W, H))
@@ -192,6 +195,8 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     frame_buffer: list = []
 
     def flush_batch():
+        nonlocal processed_frames
+
         if not frame_buffer:
             return
         n = len(frame_buffer)
@@ -348,6 +353,13 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
 
         frame_buffer.clear()
 
+        # 按批次汇报进度，不逐帧发送消息
+        processed_frames += n
+        if progress_callback is not None:
+            try:
+                progress_callback( processed_frames, total_frames, )
+            except Exception:
+                logger.warning( "视频帧进度回调失败", exc_info=True, )
 
     try:
         while True:

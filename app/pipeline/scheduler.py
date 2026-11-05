@@ -24,8 +24,23 @@ from app.pipeline.anonymize import anonymize
 from app.pipeline.merge import merge
 from app.ws.progress import manager
 
+import cv2
+import threading
+import time
+
 logger = logging.getLogger(__name__)
 
+def _get_video_frame_count(path: Path) -> int:
+    """
+    获取视频总帧数，只读取视频元数据，不解码全部视频。
+    """
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            return 0
+        return max(0,int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+    finally:
+        cap.release()
 
 class PipelineScheduler:
     def __init__(self):
@@ -194,6 +209,7 @@ class PipelineScheduler:
                     ))
                 db.commit()
 
+            """
             task.status = "anonymizing"
             db.commit()
             await manager.broadcast({"task_id": task_id, "status": "anonymizing"})
@@ -217,6 +233,142 @@ class PipelineScheduler:
                     raise r
             results.sort(key=lambda x: x[0])
             anonymized = [r[1] for r in results]
+            """
+            # --------------------------------------------------
+            # 匿名化阶段：汇总整个任务的帧处理进度
+            # --------------------------------------------------
+            task.status = "anonymizing"
+            db.commit()
+
+            # 每个分段的总帧数
+            segment_totals = await asyncio.to_thread(
+                lambda: [
+                    _get_video_frame_count(seg)
+                    for seg in kept
+                ]
+            )
+
+            # 每个分段当前已处理帧数
+            segment_done = [0] * len(kept)
+
+            # 总帧数
+            total_frames = sum(segment_totals)
+
+            # 多线程回调共享状态
+            progress_lock = threading.Lock()
+            last_broadcast = [0.0]
+
+            loop = asyncio.get_running_loop()
+
+            def publish_progress(force=False):
+                """
+                汇总各分段进度。
+                最多约每秒向前端推送一次，减少 WebSocket 开销。
+                """
+                with progress_lock:
+                    current_frames = sum(segment_done)
+                    current_total = sum(segment_totals)
+
+                    now = time.monotonic()
+
+                    # 限制消息发送频率
+                    if (
+                        not force
+                        and now - last_broadcast[0] < 1.0
+                        and current_frames < current_total
+                    ):
+                        return
+
+                    last_broadcast[0] = now
+
+                    message = {
+                        "task_id": task_id,
+                        "event": "frame_progress",
+                        "frame_current": current_frames,
+                        "frame_total": current_total,
+                    }
+
+                # 回调可能来自 asyncio.to_thread 的工作线程
+                # 使用事件循环线程发送 WebSocket
+                def send():
+                    asyncio.create_task(
+                        manager.broadcast(message)
+                    )
+
+                loop.call_soon_threadsafe(send)
+
+            # 先发送一次初始进度
+            await manager.broadcast({
+                "task_id": task_id,
+                "event": "frame_progress",
+                "frame_current": 0,
+                "frame_total": total_frames,
+            })
+
+            async def _anon_one(idx: int, seg: Path):
+                out = WORKDIR / f"{stem}_anon_{idx:04d}.mp4"
+
+                def on_frame_progress(current, total):
+                    """
+                    单个分段的进度回调。
+                    该回调运行在线程池工作线程中。
+                    """
+                    with progress_lock:
+                        if total > 0:
+                            segment_totals[idx] = total
+
+                        segment_done[idx] = max(
+                            0,
+                            min(
+                                int(current),
+                                segment_totals[idx]
+                            ) if segment_totals[idx] > 0
+                            else int(current)
+                        )
+
+                    publish_progress()
+
+                async with self.gpu_sem:
+                    await asyncio.to_thread(
+                        anonymize,
+                        seg,
+                        out,
+                        settings,
+                        on_frame_progress,
+                    )
+
+                return idx, out
+
+            logger.info(
+                "任务 %s 匿名化：%d 段，GPU 并发上限 %d，总帧数 %d",
+                task_id,
+                len(kept),
+                self.gpu_sem._value if self.gpu_sem else 1,
+                total_frames,
+            )
+
+            results = await asyncio.gather(
+                *[
+                    _anon_one(i, s)
+                    for i, s in enumerate(kept)
+                ],
+                return_exceptions=True,
+            )
+
+            for r in results:
+                if isinstance(r, BaseException):
+                    raise r
+
+            results.sort(key=lambda x: x[0])
+            anonymized = [r[1] for r in results]
+
+            # 所有分段匿名化完成，强制推送最终帧数
+            with progress_lock:
+                for idx in range(len(segment_done)):
+                    if segment_totals[idx] > 0:
+                        segment_done[idx] = segment_totals[idx]
+
+            publish_progress(force=True)            
 
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
 
