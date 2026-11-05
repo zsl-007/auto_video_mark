@@ -33,7 +33,9 @@ EDITABLE_KEYS = (
     "static_frame_drop_enabled",
     "anonymize_face",
     "face_blur_strength",
-    "face_expand_scale",    
+    "face_expand_scale",
+    "anonymize_person",
+    "person_anonymize_part",        
     "anonymize_plate",
     "anonymize_text",              # 新增文本检测 # 开关
     "text_conf",                   # 新增文本检测 # 文字检测置信度
@@ -75,7 +77,9 @@ def _defaults() -> dict[str, Any]:
         "static_frame_drop_enabled": bool(config.STATIC_FRAME_DROP_ENABLED),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
         "face_blur_strength": int(config.FACE_BLUR_STRENGTH),
-        "face_expand_scale": float(config.FACE_EXPAND_SCALE),        
+        "face_expand_scale": float(config.FACE_EXPAND_SCALE),  
+        "anonymize_person": bool(config.ANONYMIZE_PERSON),
+        "person_anonymize_part": str(config.PERSON_ANONYMIZE_PART),
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "anonymize_text": bool(config.ANONYMIZE_TEXT),                     # 新增
         "text_conf": float(config.TEXT_CONF),                              # 新增
@@ -153,7 +157,6 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
             raise SettingsValidationError( "face_blur_strength 须在 1–10 之间" )
         clean["face_blur_strength"] = v
 
-
     if "face_expand_scale" in patch:
         try:
             v = float(patch["face_expand_scale"])
@@ -162,6 +165,15 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
         if not 1.0 <= v <= 2.5:
             raise SettingsValidationError( "face_expand_scale 须在 1.0–2.5 之间" )
         clean["face_expand_scale"] = v        
+
+    if "anonymize_person" in patch:
+        clean["anonymize_person"] = bool( patch["anonymize_person"] )
+
+    if "person_anonymize_part" in patch:
+        v = str(patch["person_anonymize_part"])
+        if v not in ("head", "body"):
+            raise SettingsValidationError( "person_anonymize_part 必须是 head 或 body" )
+        clean["person_anonymize_part"] = v
 
     if "anonymize_plate" in patch:
         clean["anonymize_plate"] = bool(patch["anonymize_plate"])

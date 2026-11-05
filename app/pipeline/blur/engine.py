@@ -17,7 +17,8 @@ import cv2
 from app.core.config import (
     ANONYMIZE_DEVICE, BLUR_STRENGTH, FACE_DETECTOR, MODELS_DIR,
 )
-from .detectors import PlateDetectorYOLO, FaceDetectorHaar, FaceDetectorYOLO, TextDetectorYOLO
+
+from .detectors import ( PlateDetectorYOLO, FaceDetectorHaar, FaceDetectorYOLO, TextDetectorYOLO, PersonDetectorYOLO,)
 
 from .blur_ops import ( gaussian_inplace,  pixelate_inplace,  face_blur_inplace, )
 from .utils import ( choose_device, expand_box, expand_face_box, nms_merge,)
@@ -28,33 +29,31 @@ logger = logging.getLogger(__name__)
 
 _tls = threading.local()
 
-
 class _DetectorBundle:
-    __slots__ = ("plate_detector", "face_detector", "face_is_yolo", "text_detector")
+    __slots__ = ("plate_detector","face_detector","face_is_yolo","text_detector","person_detector",)
 
-    def __init__(self, plate_detector, face_detector, face_is_yolo, text_detector=None):
+    def __init__(self,plate_detector,face_detector,face_is_yolo,text_detector=None,person_detector=None,):
         self.plate_detector = plate_detector
         self.face_detector = face_detector
         self.face_is_yolo = face_is_yolo
         self.text_detector = text_detector
+        self.person_detector = person_detector
 
-
-def _build_detectors(plate_weights, face_weights, text_weights, device, conf,
-                     use_plate, use_face, face_backend, use_text, text_conf):
-    plate_detector = PlateDetectorYOLO(plate_weights, device, conf) if use_plate else None
+def _build_detectors(plate_weights,face_weights,text_weights,person_weights,device,conf,
+                    use_plate,use_face,face_backend,use_text,text_conf,use_person,person_conf,):
+    plate_detector = ( PlateDetectorYOLO(plate_weights, device, conf) if use_plate else None )
     face_detector = None
     face_is_yolo = False
     if use_face:
         if face_backend == "yolo":
-            face_detector = FaceDetectorYOLO(face_weights, device, conf)
+            face_detector = FaceDetectorYOLO( face_weights, device, conf  )
             face_is_yolo = True
         else:
             face_detector = FaceDetectorHaar()
-    text_detector = (
-        TextDetectorYOLO(text_weights, device, text_conf) if use_text else None
-    )
-    return _DetectorBundle(plate_detector, face_detector, face_is_yolo, text_detector)
+    text_detector = ( TextDetectorYOLO(text_weights, device, text_conf) if use_text else None )
+    person_detector = ( PersonDetectorYOLO( person_weights, device, person_conf, )  if use_person else None )
 
+    return _DetectorBundle( plate_detector, face_detector, face_is_yolo, text_detector, person_detector, )
 
 def _get_detectors(cache_key, factory) -> _DetectorBundle:
     cache = getattr(_tls, "cache", None)
@@ -85,6 +84,14 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     blur_method = settings["blur_method"]
     anonymize_face = bool(settings["anonymize_face"])
     anonymize_plate = bool(settings["anonymize_plate"])
+
+    # 人体匿名化
+    anonymize_person = bool( settings.get("anonymize_person", False) )
+    person_anonymize_part = str( settings.get("person_anonymize_part", "head") )
+    if person_anonymize_part not in ("head", "body"):
+        person_anonymize_part = "head"
+    person_conf = float(  getattr(cfg, "PERSON_DETECTOR_CONF", 0.35) )
+
     anonymize_text = bool(settings.get("anonymize_text", False))
     text_conf = float(settings.get("text_conf", getattr(cfg, "TEXT_CONF", 0.25)))
     text_iou_threshold = float(settings.get("text_iou_threshold",
@@ -115,22 +122,22 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     plate_weights = str(MODELS_DIR / "license_plate_detector.pt")
     face_weights = str(MODELS_DIR / "yolov8n-face.pt")
     text_weights = str(MODELS_DIR / "yolov8s-text.pt")
+    person_weights = str(MODELS_DIR / "yolov8n.pt")
 
     # text_conf 只在启用文字匿名化时进 cache_key，避免未启用时无谓重载模型
     cache_key = (
-        plate_weights, face_weights, text_weights, device, conf,
-        anonymize_plate, anonymize_face, FACE_DETECTOR,
-        anonymize_text,
+        plate_weights, face_weights, text_weights, person_weights, device, conf,
+        anonymize_plate, anonymize_face, FACE_DETECTOR, anonymize_text,
         text_conf if anonymize_text else None,
+        anonymize_person,
+        person_conf if anonymize_person else None,
     )
 
     def factory():
         return _build_detectors(
-            plate_weights, face_weights, text_weights, device, conf,
-            anonymize_plate, anonymize_face, FACE_DETECTOR,
-            anonymize_text, text_conf,
+            plate_weights, face_weights, text_weights, person_weights, device, conf,
+            anonymize_plate, anonymize_face, FACE_DETECTOR, anonymize_text, text_conf, anonymize_person, person_conf,
         )
-
     bundle = _get_detectors(cache_key, factory)
 
     cap = cv2.VideoCapture(str(input_path))
@@ -150,6 +157,7 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     # 人脸和车牌必须使用不同 tracker。
     plate_tracker = None
     face_tracker = None
+    person_tracker = None
 
     tracker_kwargs = {
         "track_buffer": tracking_track_buffer,
@@ -170,6 +178,11 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
         if bundle.face_detector is not None:
             face_tracker = UltralyticsByteTrack(**tracker_kwargs)
 
+        if bundle.person_detector is not None:
+            person_tracker = UltralyticsByteTrack(
+                **tracker_kwargs
+            )
+
     frame_buffer: list = []
 
     def flush_batch():
@@ -189,6 +202,14 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
                 face_boxes = [bundle.face_detector(f) for f in frame_buffer]
         else:
             face_boxes = [[] for _ in range(n)]
+
+        if bundle.person_detector is not None:
+            person_boxes = bundle.person_detector.batch_call(
+                frame_buffer,
+                imgsz=imgsz,
+            )
+        else:
+            person_boxes = [[] for _ in range(n)]
 
         if bundle.text_detector is not None:
             text_boxes = bundle.text_detector.batch_call(frame_buffer, imgsz=imgsz)
@@ -226,6 +247,36 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
                     else:
                         pixelate_inplace( frame, x1, y1, x2, y2, )
 
+        def _blur_person_boxes(frame, boxes):
+            """
+            人体匿名化。
+
+            body：模糊完整人体。
+            head：仅模糊人体框上部，覆盖头部和侧脸区域。
+            """
+            for x1, y1, x2, y2 in _coordinates(boxes):
+                x1 = max(0, min(W - 1, x1))
+                y1 = max(0, min(H - 1, y1))
+                x2 = max(0, min(W, x2))
+                y2 = max(0, min(H, y2))
+
+                bw = x2 - x1
+                bh = y2 - y1
+
+                if bw <= 1 or bh <= 1:
+                    continue
+
+                if person_anonymize_part == "head":
+                    # 取人体框上部约 38%，覆盖头部、头发和侧脸。
+                    # 保留人体框全宽，降低侧脸、转头时漏遮挡的风险。
+                    head_h = max(1, int(bh * 0.38))
+                    y2 = min(H, y1 + head_h)
+
+                if blur_method == "gaussian":
+                    gaussian_inplace( frame, x1, y1, x2, y2, blur_strength, )
+                else:
+                    pixelate_inplace( frame, x1, y1, x2, y2, )
+
         for i, frame in enumerate(frame_buffer):
             # --------------------------------------------------
             # 1. 车牌检测 + 独立跟踪
@@ -257,6 +308,18 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
             # 人脸独立处理
             if face_regions:
                 _blur_boxes( frame, face_regions, is_face=True, )            
+
+            # --------------------------------------------------
+            # 3. 人体检测 + 独立跟踪 + 匿名化
+            # --------------------------------------------------
+            if bundle.person_detector is not None:
+                current_person_boxes = person_boxes[i]
+
+                if person_tracker is not None:
+                    current_person_boxes = person_tracker.update( current_person_boxes, frame, )
+
+                if current_person_boxes:
+                    _blur_person_boxes( frame, current_person_boxes, )
 
             # --------------------------------------------------
             # 3. 文字匿名化保持独立

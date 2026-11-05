@@ -38,6 +38,11 @@
       { key: 'anonymize_face',   type: 'boolean' },
       { key: 'face_blur_strength', type: 'number', min: 1, max: 10, step: 1 },
       { key: 'face_expand_scale', type: 'number', min: 1, max: 2.5, step: 0.05 },
+      { key: 'anonymize_person', type: 'boolean' },
+      { key: 'person_anonymize_part', type: 'select', options: [ 
+        { value: 'head', label: '仅头部（包含侧脸）' }, 
+        { value: 'body', label: '完整人体' }, 
+      ], },      
       { key: 'anonymize_plate',  type: 'boolean' },
       { key: 'anonymize_text',      type: 'boolean' },                       // 新增
       { key: 'text_conf',           type: 'number', min: 0.01, max: 1,   step: 0.01 },  // 新增
@@ -75,7 +80,9 @@
       static_frame_drop_enabled: { label: '丢弃静态帧', fmt: v => v ? '开启（输出无音频）' : '关闭', },
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
       face_blur_strength: { label: '人脸模糊强度（越大越模糊）', fmt: v => `${v} / 10`, },
-      face_expand_scale: { label: '人脸打码范围（包含头发）', fmt: v => `${Number(v).toFixed(2)}×`, },      
+      face_expand_scale: { label: '人脸打码范围（包含头发）', fmt: v => `${Number(v).toFixed(2)}×`, }, 
+      anonymize_person: { label: '人体匿名化', fmt: v => v ? '开启' : '关闭', },
+      person_anonymize_part: { label: '人体匿名化部位', fmt: v => v === 'head' ? '仅头部' : '完整人体', },           
       anonymize_plate: { label: '车牌匿名化', fmt: v => v ? '开启' : '关闭' },
       anonymize_text: { label: '文字匿名化', fmt: v => v ? '开启' : '关闭' },                                    // 新增
       text_conf: { label: '文字检测置信度（越低越敏感）', fmt: v => v },                                         // 新增
@@ -604,6 +611,19 @@
         trackingSwitch.addEventListener('change', syncTracking);
         syncTracking();
       }
+
+      // 人体匿名化开关联动
+      const personSwitch = els.settingsList.querySelector( '[data-key="anonymize_person"]' );
+      const personPartControl = els.settingsList.querySelector( '[data-key="person_anonymize_part"]' );
+      if (personSwitch && personPartControl) {
+        const syncPerson = () => {
+          const enabled = personSwitch.checked;
+          personPartControl.disabled = !enabled;
+          personPartControl.style.opacity = enabled ? '1' : '.5';
+        };
+        personSwitch.addEventListener('change', syncPerson);
+        syncPerson();
+      }      
 
     }
     function enterSettingsEdit() {
