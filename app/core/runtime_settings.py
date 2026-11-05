@@ -35,7 +35,9 @@ EDITABLE_KEYS = (
     "face_blur_strength",
     "face_expand_scale",
     "anonymize_person",
-    "person_anonymize_part",        
+    "person_anonymize_part",
+    "person_blur_strength",
+    "person_head_ratio",            
     "anonymize_plate",
     "anonymize_text",              # 新增文本检测 # 开关
     "text_conf",                   # 新增文本检测 # 文字检测置信度
@@ -80,6 +82,8 @@ def _defaults() -> dict[str, Any]:
         "face_expand_scale": float(config.FACE_EXPAND_SCALE),  
         "anonymize_person": bool(config.ANONYMIZE_PERSON),
         "person_anonymize_part": str(config.PERSON_ANONYMIZE_PART),
+        "person_blur_strength": int(config.PERSON_BLUR_STRENGTH),
+        "person_head_ratio": float(config.PERSON_HEAD_RATIO),        
         "anonymize_plate": bool(config.ANONYMIZE_PLATE),
         "anonymize_text": bool(config.ANONYMIZE_TEXT),                     # 新增
         "text_conf": float(config.TEXT_CONF),                              # 新增
@@ -174,6 +178,24 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
         if v not in ("head", "body"):
             raise SettingsValidationError( "person_anonymize_part 必须是 head 或 body" )
         clean["person_anonymize_part"] = v
+
+    if "person_blur_strength" in patch:
+        try:
+            v = int(patch["person_blur_strength"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("person_blur_strength 必须是整数")
+        if not 1 <= v <= 10:
+            raise SettingsValidationError("person_blur_strength 须在 1–10 之间")
+        clean["person_blur_strength"] = v
+
+    if "person_head_ratio" in patch:
+        try:
+            v = float(patch["person_head_ratio"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError("person_head_ratio 必须是数字")
+        if not 0.10 <= v <= 0.80:
+            raise SettingsValidationError("person_head_ratio 须在 0.10–0.80 之间")
+        clean["person_head_ratio"] = v
 
     if "anonymize_plate" in patch:
         clean["anonymize_plate"] = bool(patch["anonymize_plate"])

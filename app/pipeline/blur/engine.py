@@ -91,6 +91,12 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
     if person_anonymize_part not in ("head", "body"):
         person_anonymize_part = "head"
     person_conf = float(  getattr(cfg, "PERSON_DETECTOR_CONF", 0.35) )
+    # 人体专用模糊强度
+    person_blur_strength = int( settings.get("person_blur_strength",getattr(cfg, "PERSON_BLUR_STRENGTH", 7), ) )
+    person_blur_strength = max(1, min(10, person_blur_strength))
+    # 人体头部区域比例
+    person_head_ratio = float( settings.get( "person_head_ratio", getattr(cfg, "PERSON_HEAD_RATIO", 0.30), ))
+    person_head_ratio = max(0.10, min(0.80, person_head_ratio))
 
     anonymize_text = bool(settings.get("anonymize_text", False))
     text_conf = float(settings.get("text_conf", getattr(cfg, "TEXT_CONF", 0.25)))
@@ -252,9 +258,14 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
             人体匿名化。
 
             body：模糊完整人体。
-            head：仅模糊人体框上部，覆盖头部和侧脸区域。
+            head：仅模糊人体框上部，覆盖头部、头发和侧脸。
+
+            person_blur_strength：1~10，越大模糊越强。
+            person_head_ratio：头部区域占人体检测框高度的比例。
             """
             for x1, y1, x2, y2 in _coordinates(boxes):
+
+                # 限制检测框范围
                 x1 = max(0, min(W - 1, x1))
                 y1 = max(0, min(H - 1, y1))
                 x2 = max(0, min(W, x2))
@@ -267,15 +278,13 @@ def process_video(input_path: Path, output_path: Path, settings: dict,
                     continue
 
                 if person_anonymize_part == "head":
-                    # 取人体框上部约 38%，覆盖头部、头发和侧脸。
-                    # 保留人体框全宽，降低侧脸、转头时漏遮挡的风险。
-                    head_h = max(1, int(bh * 0.38))
+                    # 按设置的比例截取人体框上部
+                    head_h = max( 1, int(bh * person_head_ratio) )
                     y2 = min(H, y1 + head_h)
 
-                if blur_method == "gaussian":
-                    gaussian_inplace( frame, x1, y1, x2, y2, blur_strength, )
-                else:
-                    pixelate_inplace( frame, x1, y1, x2, y2, )
+                # 使用与人脸相同的专用模糊算法
+                # 同时支持马赛克和高斯模糊
+                face_blur_inplace( frame, x1, y1, x2, y2, method=blur_method, strength=person_blur_strength, )
 
         for i, frame in enumerate(frame_buffer):
             # --------------------------------------------------

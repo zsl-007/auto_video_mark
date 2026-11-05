@@ -95,3 +95,7 @@ TRACKING_PREDICT_LOST = (os.getenv("TRACKING_PREDICT_LOST", "true").lower() == "
 ANONYMIZE_PERSON = (os.getenv("ANONYMIZE_PERSON", "false").lower() == "true")
 PERSON_ANONYMIZE_PART = "head"  # 人体匿名部位 body/head
 PERSON_DETECTOR_CONF = float(os.getenv("PERSON_DETECTOR_CONF", "0.35"))     # 置信度
+
+# 人体匿名化增强
+PERSON_BLUR_STRENGTH = int(os.getenv("PERSON_BLUR_STRENGTH", "7"))  # 人体模糊强度 1~10
+PERSON_HEAD_RATIO = float(os.getenv("PERSON_HEAD_RATIO", "0.30"))   # 头部区域占人体框高度比例

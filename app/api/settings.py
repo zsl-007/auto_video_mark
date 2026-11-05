@@ -25,7 +25,9 @@ class SettingsPatch(BaseModel):
     face_blur_strength: int | None = Field( default=None, ge=1, le=10, )
     face_expand_scale: float | None = Field( default=None, ge=1.0, le=2.5, ) 
     anonymize_person: bool | None = None
-    person_anonymize_part: str | None = Field( default=None, pattern="^(head|body)$", )  # person_anonymize_part: Literal["head", "body"] | None = None      
+    person_anonymize_part: str | None = Field( default=None, pattern="^(head|body)$", )  # person_anonymize_part: Literal["head", "body"] | None = None
+    person_blur_strength: int | None = Field(default=None, ge=1, le=10)
+    person_head_ratio: float | None = Field(default=None, ge=0.10, le=0.80)    
     anonymize_plate: bool | None = None
     anonymize_text: bool | None = None                                            # 新增
     text_conf: float | None = Field(default=None, ge=0.01, le=1.0)                # 新增

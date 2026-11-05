@@ -43,6 +43,8 @@
         { value: 'head', label: '仅头部（包含侧脸）' }, 
         { value: 'body', label: '完整人体' }, 
       ], },      
+      { key: 'person_blur_strength', type: 'number', min: 1, max: 10, step: 1 },
+      { key: 'person_head_ratio', type: 'number', min: 0.10, max: 0.80, step: 0.01 },      
       { key: 'anonymize_plate',  type: 'boolean' },
       { key: 'anonymize_text',      type: 'boolean' },                       // 新增
       { key: 'text_conf',           type: 'number', min: 0.01, max: 1,   step: 0.01 },  // 新增
@@ -82,7 +84,9 @@
       face_blur_strength: { label: '人脸模糊强度（越大越模糊）', fmt: v => `${v} / 10`, },
       face_expand_scale: { label: '人脸打码范围（包含头发）', fmt: v => `${Number(v).toFixed(2)}×`, }, 
       anonymize_person: { label: '人体匿名化', fmt: v => v ? '开启' : '关闭', },
-      person_anonymize_part: { label: '人体匿名化部位', fmt: v => v === 'head' ? '仅头部' : '完整人体', },           
+      person_anonymize_part: { label: '人体匿名化部位', fmt: v => v === 'head' ? '仅头部' : '完整人体', },     
+      person_blur_strength: { label: '人体模糊强度（越大越模糊）', fmt: v => `${v} / 10`, },
+      person_head_ratio: { label: '人体头部区域比例', fmt: v => `${(Number(v) * 100).toFixed(0)}%`, },            
       anonymize_plate: { label: '车牌匿名化', fmt: v => v ? '开启' : '关闭' },
       anonymize_text: { label: '文字匿名化', fmt: v => v ? '开启' : '关闭' },                                    // 新增
       text_conf: { label: '文字检测置信度（越低越敏感）', fmt: v => v },                                         // 新增
@@ -612,18 +616,46 @@
         syncTracking();
       }
 
-      // 人体匿名化开关联动
+      // 人体匿名化参数联动
       const personSwitch = els.settingsList.querySelector( '[data-key="anonymize_person"]' );
       const personPartControl = els.settingsList.querySelector( '[data-key="person_anonymize_part"]' );
-      if (personSwitch && personPartControl) {
+      const personStrengthControl = els.settingsList.querySelector( '[data-key="person_blur_strength"]' );
+      const personHeadRatioControl = els.settingsList.querySelector( '[data-key="person_head_ratio"]' );
+
+      if (personSwitch) {
         const syncPerson = () => {
           const enabled = personSwitch.checked;
-          personPartControl.disabled = !enabled;
-          personPartControl.style.opacity = enabled ? '1' : '.5';
+
+          // 人体匿名化关闭时，人体相关参数全部禁用
+          if (personPartControl) {
+            personPartControl.disabled = !enabled;
+            personPartControl.style.opacity = enabled ? '1' : '.5';
+          }
+
+          if (personStrengthControl) {
+            personStrengthControl.disabled = !enabled;
+            personStrengthControl.style.opacity = enabled ? '1' : '.5';
+          }
+
+          // 头部比例仅在选择头部匿名化时生效
+          const isHead = enabled &&
+            personPartControl &&
+            personPartControl.value === 'head';
+
+          if (personHeadRatioControl) {
+            personHeadRatioControl.disabled = !isHead;
+            personHeadRatioControl.style.opacity = isHead ? '1' : '.5';
+          }
         };
+
         personSwitch.addEventListener('change', syncPerson);
+
+        if (personPartControl) {
+          personPartControl.addEventListener('change', syncPerson);
+        }
+
         syncPerson();
-      }      
+      }    
 
     }
     function enterSettingsEdit() {
