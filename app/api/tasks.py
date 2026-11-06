@@ -67,47 +67,89 @@ def get_db():
 # ---------------------------------------------------------------------------
 
 # output_path 形如：{stem}_anonymized_0000.mp4
-_SEG_OUTPUT_RE = re.compile(r"^(?P<stem>.+)_anonymized_\d{4}\.mp4$")
+#_SEG_OUTPUT_RE = re.compile(r"^(?P<stem>.+)_anonymized_\d{4}\.mp4$")
+_SEG_OUTPUT_RE = re.compile(
+    r"^(?P<stem>.+)_\d{4}-.+\.mp4$"
+)
 _MULTI_OUTPUT_RE_CACHE: dict[str, re.Pattern] = {}
 
-
+"""
 def _multi_output_pattern(stem: str) -> re.Pattern:
     pat = _MULTI_OUTPUT_RE_CACHE.get(stem)
     if pat is None:
         pat = re.compile(rf"^{re.escape(stem)}_anonymized_\d{{4}}\.mp4$")
         _MULTI_OUTPUT_RE_CACHE[stem] = pat
     return pat
+"""
+def _multi_output_pattern(stem: str) -> re.Pattern:
+    pat = _MULTI_OUTPUT_RE_CACHE.get(stem)
 
+    if pat is None:
+        pat = re.compile(
+            rf"^{re.escape(stem)}_\d{{4}}-.+\.mp4$"
+        )
+
+        _MULTI_OUTPUT_RE_CACHE[stem] = pat
+
+    return pat
 
 def _collect_output_files(task: Task) -> list[str]:
-    """收集某任务的全部输出文件名。
+    """
+    收集某任务的全部输出文件名。
 
-    判定逻辑：
-    1. 若 output_path 形如 {stem}_anonymized_0000.mp4（分段 + 未合并），
-       则扫描 OUTPUT_DIR，收集所有匹配 {stem}_anonymized_*.mp4 的文件；
-    2. 否则回退到 output_path 的单文件（含已合并、单段任务）。
+    新格式多分段：
+        ID65543_0001-目录-时长-分辨率-日期.mp4
+
+    旧格式多分段：
+        原文件名_anonymized_0000.mp4
+
+    单文件或合并文件：
+        直接返回 task.output_path 对应文件。
     """
     files: list[str] = []
 
     if task.status == "completed" and task.output_path:
         out_name = Path(task.output_path).name
-        m = _SEG_OUTPUT_RE.match(out_name)
-        if m:
-            stem = m.group("stem")
-            pattern = _multi_output_pattern(stem)
+
+        # 新格式：ID65543_0001-目录-时长-分辨率-日期.mp4
+        new_match = re.match(
+            r"^(?P<stem>.+)_\d{4}-.+\.mp4$",
+            out_name,
+        )
+
+        # 旧格式：原文件名_anonymized_0000.mp4
+        old_match = re.match(
+            r"^(?P<stem>.+)_anonymized_\d{4}\.mp4$",
+            out_name,
+        )
+
+        match = new_match or old_match
+
+        if match:
+            stem = match.group("stem")
+
+            if new_match:
+                pattern = re.compile(
+                    rf"^{re.escape(stem)}_\d{{4}}-.+\.mp4$"
+                )
+            else:
+                pattern = re.compile(
+                    rf"^{re.escape(stem)}_anonymized_\d{{4}}\.mp4$"
+                )
+
             try:
                 for p in sorted(OUTPUT_DIR.iterdir()):
                     if p.is_file() and pattern.match(p.name):
                         files.append(p.name)
+
             except FileNotFoundError:
                 pass
 
-    # 回退：单文件
+    # 单文件、合并文件，或者扫描失败时回退
     if not files and task.output_path:
         files = [Path(task.output_path).name]
 
     return files
-
 
 def _enrich_task_dict(task: Task) -> dict:
     """把 Task ORM 对象转成 dict，并补充 output_files 列表。"""

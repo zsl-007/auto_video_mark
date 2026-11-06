@@ -7,10 +7,14 @@ from typing import Optional
 from datetime import datetime
 
 from app.core.config import (
-    OUTPUT_DIR, WORKDIR,
+    INPUT_DIR, OUTPUT_DIR, WORKDIR,
     MAX_WORKERS_PER_STAGE, QUEUE_MAXSIZE,
     RESOURCE_CHECK_INTERVAL,
 )
+
+import json
+import re
+import subprocess
 
 from app.core.resources import resource_ok
 from app.core.runtime_settings import get_settings
@@ -41,6 +45,279 @@ def _get_video_frame_count(path: Path) -> int:
         return max(0,int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
     finally:
         cap.release()
+
+def _probe_video_metadata(path: Path) -> dict:
+    """
+    使用 ffprobe 读取视频元数据。
+
+    duration：视频时长
+    width/height：视频分辨率
+    format_tags/stream_tags：媒体元数据，用于提取拍摄日期
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_format",
+        "-show_streams",
+        "-of", "json",
+        str(path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        data = json.loads(result.stdout or "{}")
+
+        format_info = data.get("format", {})
+        streams = data.get("streams", [])
+
+        duration = float(format_info.get("duration") or 0)
+
+        width = 0
+        height = 0
+
+        for stream in streams:
+            if stream.get("codec_type") == "video":
+                width = int(stream.get("width") or 0)
+                height = int(stream.get("height") or 0)
+                break
+
+        # ffprobe 时长获取失败时，使用 OpenCV 元数据兜底
+        if duration <= 0:
+            cap = cv2.VideoCapture(str(path))
+            try:
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+
+                    if fps > 0:
+                        duration = frames / fps
+            finally:
+                cap.release()
+
+        if duration <= 0 or width <= 0 or height <= 0:
+            raise RuntimeError(
+                f"无法获取有效视频时长或分辨率: {path}"
+            )
+
+        return {
+            "duration": duration,
+            "width": width,
+            "height": height,
+            "format_tags": format_info.get("tags", {}),
+            "streams": streams,
+        }
+
+    except Exception as e:
+        raise RuntimeError(
+            f"读取视频元数据失败: {path}, {e}"
+        ) from e
+
+
+def _get_capture_date(source: Path) -> str:
+    """
+    从原始视频元数据中提取拍摄日期。
+
+    优先级：
+    1. creation_time
+    2. com.apple.quicktime.creationdate
+    3. date
+
+    如果原视频没有可用的拍摄日期元数据，
+    则使用原视频文件的修改日期作为兜底。
+    """
+    try:
+        info = _probe_video_metadata(source)
+
+        tag_groups = [
+            info.get("format_tags", {}),
+        ]
+
+        for stream in info.get("streams", []):
+            tag_groups.append(stream.get("tags", {}))
+
+        preferred_keys = (
+            "creation_time",
+            "com.apple.quicktime.creationdate",
+            "date",
+        )
+
+        for preferred in preferred_keys:
+            for tags in tag_groups:
+                for key, value in tags.items():
+                    if key.lower() != preferred or not value:
+                        continue
+
+                    # 兼容：
+                    # 2026-09-11T08:30:00Z
+                    # 2026:09:11 08:30:00
+                    # 20260911
+                    match = re.search(
+                        r"(\d{4})[-:]?(\d{2})[-:]?(\d{2})",
+                        str(value),
+                    )
+
+                    if match:
+                        return "".join(match.groups())
+
+    except Exception:
+        logger.warning(
+            "读取原视频拍摄日期元数据失败: %s",
+            source,
+            exc_info=True,
+        )
+
+    # 没有拍摄日期元数据时，使用文件修改日期兜底
+    return datetime.fromtimestamp(
+        source.stat().st_mtime
+    ).strftime("%Y%m%d")
+
+
+def _get_original_stem(source: Path) -> str:
+    """
+    获取原始文件名主体，去掉 watcher.py 添加的目录前缀。
+
+    例如：
+    input/校园出入口与周界/校门/
+        校园出入口与周界_校门_ID65543.mp4
+
+    还原为：
+        ID65543
+    """
+    original_stem = source.stem
+
+    try:
+        relative_parent = source.parent.relative_to(INPUT_DIR)
+        folder_parts = list(relative_parent.parts)
+    except ValueError:
+        folder_parts = []
+
+    if folder_parts:
+        prefix = "_".join(folder_parts) + "_"
+
+        if original_stem.startswith(prefix):
+            original_stem = original_stem[len(prefix):]
+
+    return original_stem
+
+
+def _build_output_filename(
+    source: Path,
+    output_path: Path,
+    capture_date: str,
+    segment_index: int | None = None,
+) -> Path:
+    """
+    生成最终输出视频文件名。
+
+    单文件或合并输出：
+        ID65543-目录1-目录2-时长-宽x高-拍摄日期.mp4
+
+    多分段且未合并：
+        ID65543_0001-目录1-目录2-时长-宽x高-拍摄日期.mp4
+
+    时长和分辨率均读取最终输出视频本身。
+    """
+    info = _probe_video_metadata(output_path)
+
+    # 四舍五入为整数秒
+    duration_seconds = int(info["duration"] + 0.5)
+
+    resolution = (
+        f"{info['width']}x{info['height']}"
+    )
+
+    original_stem = _get_original_stem(source)
+
+    try:
+        relative_parent = source.parent.relative_to(INPUT_DIR)
+        folder_parts = list(relative_parent.parts)
+    except ValueError:
+        folder_parts = []
+
+    # 多分段时，把编号放在原始 ID 后面
+    if segment_index is not None:
+        original_stem = (
+            f"{original_stem}_{segment_index:04d}"
+        )
+
+    name_parts = [
+        original_stem,
+        *folder_parts,
+        str(duration_seconds),
+        resolution,
+        capture_date,
+    ]
+
+    filename = "-".join(
+        part for part in name_parts if part
+    )
+
+    target = OUTPUT_DIR / (
+        f"{filename}{output_path.suffix.lower()}"
+    )
+
+    # 防止不同任务产生同名文件时覆盖已有结果
+    if target.exists() and target.resolve() != output_path.resolve():
+        index = 1
+
+        while True:
+            candidate = OUTPUT_DIR / (
+                f"{filename}-{index}{output_path.suffix.lower()}"
+            )
+
+            if not candidate.exists():
+                target = candidate
+                break
+
+            index += 1
+
+    return target
+
+
+def _rename_output_files(
+    source: Path,
+    output_paths: list[Path],
+) -> list[Path]:
+    """
+    批量重命名最终输出文件。
+
+    只有实际产生多个独立输出文件时，
+    才添加 _0001、_0002 等分段编号。
+    """
+    capture_date = _get_capture_date(source)
+
+    multi_output = len(output_paths) > 1
+
+    renamed_paths = []
+
+    for index, output_path in enumerate(output_paths):
+        segment_index = index + 1 if multi_output else None
+
+        target = _build_output_filename(
+            source=source,
+            output_path=output_path,
+            capture_date=capture_date,
+            segment_index=segment_index,
+        )
+
+        if output_path.resolve() != target.resolve():
+            output_path.rename(target)
+
+        logger.info(
+            "最终输出视频命名完成: %s -> %s",
+            output_path.name,
+            target.name,
+        )
+
+        renamed_paths.append(target)
+
+    return renamed_paths
 
 class PipelineScheduler:
     def __init__(self):
@@ -370,6 +647,7 @@ class PipelineScheduler:
 
             publish_progress(force=True)            
 
+            """
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
 
             if len(anonymized) == 1:
@@ -388,6 +666,81 @@ class PipelineScheduler:
                     dst = OUTPUT_DIR / f"{stem}_anonymized_{i:04d}.mp4"
                     await asyncio.to_thread(shutil.move, str(src), str(dst))
                 final_output = OUTPUT_DIR / f"{stem}_anonymized_0000.mp4"
+            """
+
+            # --------------------------------------------------
+            # 最终输出视频
+            # --------------------------------------------------
+
+            final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
+
+            output_paths = []
+
+            if len(anonymized) == 1:
+
+                # 只有一个匿名化结果，直接输出
+                await asyncio.to_thread(
+                    shutil.move,
+                    str(anonymized[0]),
+                    str(final_output),
+                )
+
+                output_paths = [final_output]
+
+            elif settings["merge_enabled"]:
+
+                # 多段视频合并
+                task.status = "merging"
+                db.commit()
+
+                await manager.broadcast({
+                    "task_id": task_id,
+                    "status": "merging",
+                })
+
+                await asyncio.to_thread(
+                    merge,
+                    anonymized,
+                    final_output,
+                    WORKDIR,
+                )
+
+                output_paths = [final_output]
+
+            else:
+
+                # 关闭合并：每个分段单独输出
+                logger.warning(
+                    "merge_enabled=False 且有 %d 段，分别输出视频",
+                    len(anonymized),
+                )
+
+                for i, src in enumerate(anonymized):
+                    dst = OUTPUT_DIR / (
+                        f"{stem}_anonymized_{i:04d}.mp4"
+                    )
+
+                    await asyncio.to_thread(
+                        shutil.move,
+                        str(src),
+                        str(dst),
+                    )
+
+                    output_paths.append(dst)
+
+
+            # --------------------------------------------------
+            # 按最终输出视频的实际信息生成文件名
+            # --------------------------------------------------
+
+            output_paths = await asyncio.to_thread(
+                _rename_output_files,
+                source,
+                output_paths,
+            )
+
+            # 数据库仍然记录第一个输出文件
+            final_output = output_paths[0]            
 
             task.status = "completed"
             task.output_path = str(final_output)
