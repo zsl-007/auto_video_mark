@@ -614,8 +614,9 @@ class PipelineScheduler:
                         except Exception as e:
 
                             logger.exception(
-                                "静态不足回收失败，丢弃该分段：%s",
+                                "静态不足回收失败，丢弃该分段：%s，失败原因：%s",
                                 seg,
+                                str(e),
                             )
 
                             # 回收失败不能把未达标原视频当作成功输出。
