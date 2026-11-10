@@ -1,7 +1,15 @@
 import os
 from pathlib import Path
 
-BASE_DIR = Path(os.getenv("BASE_DIR", "/app"))
+#BASE_DIR = Path(os.getenv("BASE_DIR", "/app"))
+# Docker 中默认为 /app；
+# 直接运行 Python 时默认为项目根目录。
+BASE_DIR = Path(
+    os.getenv(
+        "BASE_DIR",
+        str(Path(__file__).resolve().parents[2]),
+    )
+).resolve()
 
 INPUT_DIR = BASE_DIR / "input"
 OUTPUT_DIR = BASE_DIR / "output"

@@ -47,7 +47,9 @@ frontend/.vite/
 *.pid
 
 # ===== lincense =====
-app/main.pyc
+app/main.py
 app/main.pyc
 app/core/license.pyc
 app/core/license.py
+app/core/license2.pyc
+app/core/license2.py
