@@ -77,7 +77,7 @@ def _count_frames_after_mpdecimate(
         )
 
     frames = re.findall(
-        r"(?m)^frame=(\d+)\s*$",
+        r"(?m)^frame=\s*(\d+)\s*$",
         result.stdout,
     )
 
@@ -134,14 +134,12 @@ def recover_static_frames(
     """
     静态不足回收。
 
-    通过限制 mpdecimate 连续丢帧数量，保留部分静态帧，
-    使输出视频重新检测后的动态帧比例达到 target_ratio。
+    通过调整 mpdecimate 的 max 参数，逐步减少静态帧，
+    使最终视频的动态帧比例达到 target_ratio。
 
-    返回：
-        回收后实际动态帧比例。
+    动态帧比例 = 完全去重后保留的帧数 / 回收后总帧数
 
-    注意：
-        该操作会缩短视频时长，并且不保留音频。
+    返回最终文件实际检测到的动态帧比例。
     """
     target_ratio = float(target_ratio)
 
@@ -157,7 +155,8 @@ def recover_static_frames(
 
     total_frames = _get_total_frames(segment_path)
 
-    # 完全去重后剩余的动态帧数
+    # 完全去重后保留的动态帧数。
+    # max=0 表示不限制连续丢帧，得到完全去重结果。
     dynamic_frames = _count_frames_after_mpdecimate(
         segment_path,
         max_drop=0,
@@ -168,60 +167,81 @@ def recover_static_frames(
             f"视频没有可保留的动态帧: {segment_path}"
         )
 
-    # 为确保最终比例不低于目标值，使用向下取整。
+    # 回收后允许保留的最大总帧数。
+    # 例如动态帧 8500，目标比例 0.6：
+    # 最多允许保留 floor(8500 / 0.6) = 14166 帧。
     max_allowed_frames = min(
         total_frames,
         int(math.floor(dynamic_frames / target_ratio)),
     )
 
-    if max_allowed_frames < dynamic_frames:
-        raise RuntimeError(
-            "目标动态帧比例无法满足，动态帧数量不足"
-        )
+    # --------------------------------------------------
+    # 搜索正确的 mpdecimate max 参数
+    # --------------------------------------------------
+    #
+    # 注意：
+    # max=0 是特殊值，表示不限制连续丢帧。
+    # 对于正数 max：
+    #   max 越大，允许连续丢弃的静态帧越多；
+    #   输出帧数通常越少。
+    #
+    # 因此从 max=1 开始递增，寻找第一个满足：
+    # 输出总帧数 <= max_allowed_frames 的参数。
+    #
+    # 不能把 max=0 和正数参数放在同一个单调搜索区间里。
+    # --------------------------------------------------
 
-    # max_drop=0 是完全去重结果，一定满足最大帧数限制。
-    low = 0
+    best_max_drop = 0
 
-    # 寻找第一个超过允许帧数的 max_drop 上界。
-    high = 1
+    if max_allowed_frames < total_frames:
+        low = 0
+        high = 1
 
-    while high < total_frames:
-        count = _count_frames_after_mpdecimate(
+        high_count = _count_frames_after_mpdecimate(
             segment_path,
             max_drop=high,
         )
 
-        if count > max_allowed_frames:
-            break
-
-        low = high
-        high = min(high * 2, total_frames)
-
-    # 如果 high 仍然满足限制，说明搜索上界已经达到。
-    high_count = _count_frames_after_mpdecimate(
-        segment_path,
-        max_drop=high,
-    )
-
-    if high_count <= max_allowed_frames:
-        best_max_drop = high
-    else:
-        # 二分搜索最大的可行 max_drop。
-        # max_drop 越大，通常保留的帧越多。
-        while high - low > 1:
-            mid = (low + high) // 2
-
-            count = _count_frames_after_mpdecimate(
-                segment_path,
-                max_drop=mid,
+        # 指数搜索：寻找一个能够达到目标比例的上界。
+        while (
+            high_count > max_allowed_frames
+            and high < total_frames
+        ):
+            low = high
+            high = min(
+                high * 2,
+                total_frames,
             )
 
-            if count <= max_allowed_frames:
-                low = mid
-            else:
-                high = mid
+            high_count = _count_frames_after_mpdecimate(
+                segment_path,
+                max_drop=high,
+            )
 
-        best_max_drop = low
+        if high_count <= max_allowed_frames:
+
+            # 二分搜索：
+            # 找到满足目标比例的最小正数 max。
+            # 这样可以尽可能多地保留静态帧。
+            while high - low > 1:
+                mid = (low + high) // 2
+
+                mid_count = _count_frames_after_mpdecimate(
+                    segment_path,
+                    max_drop=mid,
+                )
+
+                if mid_count <= max_allowed_frames:
+                    high = mid
+                else:
+                    low = mid
+
+            best_max_drop = high
+
+        else:
+            # 极端情况下，如果正数 max 无法达到目标，
+            # 使用 max=0 的完全去重结果兜底。
+            best_max_drop = 0
 
     from app.core.hardware import encoder_args
 
@@ -254,8 +274,8 @@ def recover_static_frames(
 
         if result.returncode != 0:
             raise RuntimeError(
-                f"静态不足回收编码失败: "
-                f"{result.stderr[-1000:]}"
+                "静态不足回收编码失败："
+                f"{result.stderr[-1500:]}"
             )
 
         if (
@@ -266,14 +286,15 @@ def recover_static_frames(
                 f"静态不足回收输出文件为空: {output_path}"
             )
 
-        # 必须对最终文件重新检测，不能使用理论估算值。
+        # 对最终生成的视频重新检测，不能只相信搜索估算值。
         actual_ratio = process_static(output_path)
 
         if actual_ratio + 1e-6 < target_ratio:
             raise RuntimeError(
                 "静态不足回收后比例仍未达标："
                 f"目标={target_ratio:.4f}，"
-                f"实际={actual_ratio:.4f}"
+                f"实际={actual_ratio:.4f}，"
+                f"max={best_max_drop}"
             )
 
         return actual_ratio
@@ -286,7 +307,6 @@ def recover_static_frames(
             pass
 
         raise
-
 
 def drop_static_frames(
     segment_path: Path,
