@@ -21,6 +21,8 @@ class SettingsPatch(BaseModel):
     static_process_enabled: bool | None = None
     static_process_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     static_frame_drop_enabled: bool | None = None
+    static_recovery_enabled: bool | None = None
+    small_video_merge_enabled: bool | None = None    
     anonymize_face: bool | None = None
     face_blur_strength: int | None = Field( default=None, ge=1, le=10, )
     face_expand_scale: float | None = Field( default=None, ge=1.0, le=2.5, ) 

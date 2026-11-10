@@ -24,10 +24,13 @@ SEGMENT_DURATION = int(os.getenv("SEGMENT_DURATION", "600"))
 SEGMENT_ENABLED = os.getenv("SEGMENT_ENABLED", "true").lower() == "true"
 
 # 静态处理
-STATIC_PROCESS_ENABLED = os.getenv("STATIC_PROCESS_ENABLED", "true").lower() == "true"
-STATIC_PROCESS_THRESHOLD = float(os.getenv("STATIC_PROCESS_THRESHOLD", "0.4"))
-STATIC_FRAME_DROP_ENABLED = os.getenv("STATIC_FRAME_DROP_ENABLED", "false").lower() == "true"
-MPDECIMATE_FRAC = os.getenv("MPDECIMATE_FRAC", "0.33")
+STATIC_PROCESS_ENABLED = os.getenv("STATIC_PROCESS_ENABLED", "true").lower() == "true"  # 启用静态处理
+STATIC_PROCESS_THRESHOLD = float(os.getenv("STATIC_PROCESS_THRESHOLD", "0.6"))      # 动态帧比率
+STATIC_FRAME_DROP_ENABLED = os.getenv("STATIC_FRAME_DROP_ENABLED", "false").lower() == "true"   # 丢弃静态帧
+MPDECIMATE_FRAC = os.getenv("MPDECIMATE_FRAC", "0.33")      # ffmpeg 中进行静态画面的判断参数，为ffmpeg的默认值，在默认设置下，如果画面中超过约 33% 的区域（以 8x8 块为单位）与前一帧相比出现了超过 lo 阈值的差异，该帧就不会被丢弃。
+
+STATIC_RECOVERY_ENABLED = os.getenv( "STATIC_RECOVERY_ENABLED", "false").lower() == "true"      # 静态不足回收
+SMALL_VIDEO_MERGE_ENABLED = os.getenv( "SMALL_VIDEO_MERGE_ENABLED", "false").lower() == "true"  # 小视频合并
 
 # 匿名化
 ANONYMIZE_FACE = os.getenv("ANONYMIZE_FACE", "true").lower() == "true"

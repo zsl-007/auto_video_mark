@@ -31,6 +31,8 @@ EDITABLE_KEYS = (
     "static_process_enabled",
     "static_process_threshold",
     "static_frame_drop_enabled",
+    "static_recovery_enabled",
+    "small_video_merge_enabled",
     "anonymize_face",
     "face_blur_strength",
     "face_expand_scale",
@@ -77,6 +79,8 @@ def _defaults() -> dict[str, Any]:
         "static_process_enabled": bool(config.STATIC_PROCESS_ENABLED),
         "static_process_threshold": float(config.STATIC_PROCESS_THRESHOLD),
         "static_frame_drop_enabled": bool(config.STATIC_FRAME_DROP_ENABLED),
+        "static_recovery_enabled": bool(config.STATIC_RECOVERY_ENABLED),
+        "small_video_merge_enabled": bool(config.SMALL_VIDEO_MERGE_ENABLED),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
         "face_blur_strength": int(config.FACE_BLUR_STRENGTH),
         "face_expand_scale": float(config.FACE_EXPAND_SCALE),  
@@ -148,6 +152,12 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
 
     if "static_frame_drop_enabled" in patch:
         clean["static_frame_drop_enabled"] = bool(patch["static_frame_drop_enabled"])
+
+    if "static_recovery_enabled" in patch:
+        clean["static_recovery_enabled"] = bool( patch["static_recovery_enabled"] )
+
+    if "small_video_merge_enabled" in patch:
+        clean["small_video_merge_enabled"] = bool( patch["small_video_merge_enabled"] )
 
     if "anonymize_face" in patch:
         clean["anonymize_face"] = bool(patch["anonymize_face"])

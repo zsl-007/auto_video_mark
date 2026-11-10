@@ -23,7 +23,7 @@ from app.db.models import Task, Segment, ErrorLog
 from app.pipeline.precheck import precheck
 from app.pipeline.compress import compress
 from app.pipeline.segment import segment
-from app.pipeline.static_process import process_static, drop_static_frames
+from app.pipeline.static_process import ( process_static, drop_static_frames, recover_static_frames, )
 from app.pipeline.anonymize import anonymize
 from app.pipeline.merge import merge
 from app.ws.progress import manager
@@ -319,6 +319,88 @@ def _rename_output_files(
 
     return renamed_paths
 
+def _merge_small_video_groups(
+    video_paths: list[Path],
+    stem: str,
+    segment_duration: int,
+) -> list[Path]:
+    """
+    合并连续的短视频分组。
+
+    规则：
+    1. 以匿名化后的视频实际时长判断。
+    2. 时长小于 segment_duration 的视频进入待合并组。
+    3. 连续短视频达到 2 个及以上时执行合并。
+    4. 只有一个短视频时，原样保留。
+    5. 遇到正常长度视频时，先处理之前的短视频组。
+    6. 最后仍有待合并组时，执行收尾处理。
+    """
+    if not video_paths:
+        return []
+
+    if segment_duration <= 0:
+        raise ValueError("分段时长必须大于 0")
+
+    output_paths: list[Path] = []
+    pending: list[Path] = []
+
+    def flush_pending():
+        """处理当前连续短视频组。"""
+        nonlocal pending
+
+        if not pending:
+            return
+
+        # 只有一个短视频，不需要重新合并。
+        if len(pending) == 1:
+            output_paths.append(pending[0])
+            pending = []
+            return
+
+        merged_path = WORKDIR / (
+            f"{stem}_smallmerge_{uuid.uuid4().hex}.mp4"
+        )
+
+        logger.info(
+            "小视频合并：%d 个视频，输出 %s",
+            len(pending),
+            merged_path.name,
+        )
+
+        merge(
+            list(pending),
+            merged_path,
+            WORKDIR,
+        )
+
+        output_paths.append(merged_path)
+        pending = []
+
+    for video_path in video_paths:
+        info = _probe_video_metadata(video_path)
+        duration = float(info["duration"])
+
+        if duration < segment_duration:
+            pending.append(video_path)
+            continue
+
+        # 正常长度视频之前的短视频组先处理。
+        flush_pending()
+
+        # 正常长度视频独立保留。
+        output_paths.append(video_path)
+
+    # 处理最后一组短视频。
+    flush_pending()
+
+    logger.info(
+        "小视频合并完成：原视频 %d 个，最终视频 %d 个",
+        len(video_paths),
+        len(output_paths),
+    )
+
+    return output_paths
+
 class PipelineScheduler:
     def __init__(self):
         self.queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
@@ -417,73 +499,232 @@ class PipelineScheduler:
             await manager.broadcast({"task_id": task_id, "status": "segmenting"})
             segments = await asyncio.to_thread(segment, compressed, WORKDIR, settings)
 
+            # --------------------------------------------------
+            # 静态处理阶段
+            # --------------------------------------------------
+
             if settings["static_process_enabled"]:
                 task.status = "static_processing"
                 db.commit()
-                await manager.broadcast({"task_id": task_id, "status": "static_processing"})
 
-                threshold = settings["static_process_threshold"]
-                frame_drop = settings.get("static_frame_drop_enabled", False)
+                await manager.broadcast({
+                    "task_id": task_id,
+                    "status": "static_processing",
+                })
+
+                threshold = float(
+                    settings["static_process_threshold"]
+                )
+
+                frame_drop = bool(
+                    settings.get(
+                        "static_frame_drop_enabled",
+                        False,
+                    )
+                )
+
+                recovery_enabled = bool(
+                    settings.get(
+                        "static_recovery_enabled",
+                        False,
+                    )
+                )
+
                 kept = []
 
                 for idx, seg in enumerate(segments):
-                    ratio = await asyncio.to_thread(process_static, seg)
-                    is_dropped = ratio < threshold
 
-                    if is_dropped:
-                        db.add(Segment(
-                            task_id=task_id, index=idx,
-                            path=str(seg),
-                            status="dropped",
-                            frame_ratio=ratio,
-                        ))
-                        db.commit()
-                        continue
+                    # 原始动态帧比例。
+                    ratio = await asyncio.to_thread(
+                        process_static,
+                        seg,
+                    )
+
+                    logger.info(
+                        "静态检测：%s，动态帧比例 %.2f%%，阈值 %.2f%%",
+                        seg.name,
+                        ratio * 100,
+                        threshold * 100,
+                    )
+
+                    # --------------------------------------------------
+                    # 情况一：动态帧比例低于阈值
+                    # --------------------------------------------------
+
+                    if ratio < threshold:
+
+                        # 未开启回收：维持原有行为，直接丢弃。
+                        if not recovery_enabled:
+
+                            logger.info(
+                                "分段丢弃：%s，动态帧比例 %.2f%%",
+                                seg.name,
+                                ratio * 100,
+                            )
+
+                            db.add(Segment(
+                                task_id=task_id,
+                                index=idx,
+                                path=str(seg),
+                                status="dropped",
+                                frame_ratio=ratio,
+                            ))
+
+                            db.commit()
+                            continue
+
+                        # 开启回收：删除部分静态帧。
+                        recovered_path = WORKDIR / (
+                            f"{stem}_recovered_{idx:04d}_"
+                            f"{uuid.uuid4().hex[:8]}.mp4"
+                        )
+
+                        try:
+                            final_ratio = await asyncio.to_thread(
+                                recover_static_frames,
+                                seg,
+                                recovered_path,
+                                threshold,
+                            )
+
+                            logger.info(
+                                "静态不足回收成功：%s，"
+                                "原比例 %.2f%%，回收后 %.2f%%",
+                                seg.name,
+                                ratio * 100,
+                                final_ratio * 100,
+                            )
+
+                            db.add(Segment(
+                                task_id=task_id,
+                                index=idx,
+                                path=str(recovered_path),
+                                status="kept",
+                                frame_ratio=final_ratio,
+                            ))
+
+                            db.commit()
+
+                            kept.append(recovered_path)
+
+                            # 非常重要：
+                            # 回收成功后不能再执行完全去重。
+                            continue
+
+                        except Exception as e:
+
+                            logger.exception(
+                                "静态不足回收失败，丢弃该分段：%s",
+                                seg,
+                            )
+
+                            # 回收失败不能把未达标原视频当作成功输出。
+                            db.add(Segment(
+                                task_id=task_id,
+                                index=idx,
+                                path=str(seg),
+                                status="dropped",
+                                frame_ratio=ratio,
+                            ))
+
+                            db.commit()
+
+                            # 清理可能产生的失败输出。
+                            try:
+                                if recovered_path.exists():
+                                    recovered_path.unlink()
+                            except OSError:
+                                logger.warning(
+                                    "清理回收失败文件异常：%s",
+                                    recovered_path,
+                                )
+
+                            continue
+
+                    # --------------------------------------------------
+                    # 情况二：动态帧比例达到阈值
+                    # --------------------------------------------------
 
                     if frame_drop:
-                        deduped = WORKDIR / f"{stem}_dedup_{idx:04d}.mp4"
+
+                        deduped = WORKDIR / (
+                            f"{stem}_dedup_{idx:04d}.mp4"
+                        )
+
                         try:
-                            await asyncio.to_thread(drop_static_frames, seg, deduped)
+                            await asyncio.to_thread(
+                                drop_static_frames,
+                                seg,
+                                deduped,
+                            )
+
                             db.add(Segment(
-                                task_id=task_id, index=idx,
+                                task_id=task_id,
+                                index=idx,
                                 path=str(deduped),
                                 status="kept",
                                 frame_ratio=ratio,
                             ))
+
                             db.commit()
+
                             kept.append(deduped)
+
                         except Exception as e:
-                            logger.warning("帧级去重失败，回退原分段: %s (%s)", seg, e)
+
+                            logger.warning(
+                                "帧级完全去重失败，回退原分段："
+                                "%s (%s)",
+                                seg,
+                                e,
+                            )
+
                             db.add(Segment(
-                                task_id=task_id, index=idx,
+                                task_id=task_id,
+                                index=idx,
                                 path=str(seg),
                                 status="kept",
                                 frame_ratio=ratio,
                             ))
+
                             db.commit()
+
                             kept.append(seg)
+
                     else:
+
                         db.add(Segment(
-                            task_id=task_id, index=idx,
+                            task_id=task_id,
+                            index=idx,
                             path=str(seg),
                             status="kept",
                             frame_ratio=ratio,
                         ))
+
                         db.commit()
+
                         kept.append(seg)
 
                 if not kept:
-                    raise RuntimeError("所有分段均为静态，无可用输出")
+                    raise RuntimeError(
+                        "没有可用分段：所有分段均被静态筛选丢弃，"
+                        "或静态不足回收失败"
+                    )
+
             else:
-                # 关闭静态处理（保持上一轮实现）
+
+                # 关闭静态处理时，保持原有行为。
                 kept = list(segments)
+
                 for idx, seg in enumerate(segments):
                     db.add(Segment(
-                        task_id=task_id, index=idx,
+                        task_id=task_id,
+                        index=idx,
                         path=str(seg),
                         status="kept",
                         frame_ratio=None,
                     ))
+
                 db.commit()
 
             """
@@ -640,6 +881,8 @@ class PipelineScheduler:
             anonymized = [r[1] for r in results]
 
             # 所有分段匿名化完成，强制推送最终帧数
+
+            # 所有分段匿名化完成，强制推送最终帧数
             with progress_lock:
                 for idx in range(len(segment_done)):
                     if segment_totals[idx] > 0:
@@ -647,6 +890,40 @@ class PipelineScheduler:
 
             publish_progress(force=True)            
 
+            # --------------------------------------------------
+            # 小视频合并阶段
+            # 必须在匿名化完成之后、最终输出之前执行。
+            # --------------------------------------------------
+
+            small_video_merge_enabled = bool(
+                settings.get(
+                    "small_video_merge_enabled",
+                    False,
+                )
+            )
+
+            if (
+                small_video_merge_enabled
+                and settings["segment_enabled"]
+                and not settings["merge_enabled"]
+                and len(anonymized) > 1
+            ):
+
+                task.status = "merging"
+                db.commit()
+
+                await manager.broadcast({
+                    "task_id": task_id,
+                    "status": "merging",
+                })
+
+                anonymized = await asyncio.to_thread(
+                    _merge_small_video_groups,
+                    anonymized,
+                    stem,
+                    int(settings["segment_duration"]),
+                )
+                
             """
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
 
@@ -803,7 +1080,9 @@ def _cleanup_intermediates(stem: str):
         WORKDIR / f"{stem}_compressed_segments",
     ]
     candidates.extend(WORKDIR.glob(f"{stem}_anon_*.mp4"))
-    candidates.extend(WORKDIR.glob(f"{stem}_dedup_*.mp4")) 
+    candidates.extend(WORKDIR.glob(f"{stem}_dedup_*.mp4"))
+    candidates.extend(WORKDIR.glob(f"{stem}_recovered_*.mp4"))
+    candidates.extend(WORKDIR.glob(f"{stem}_smallmerge_*.mp4"))    
 
     for p in candidates:
         try:
