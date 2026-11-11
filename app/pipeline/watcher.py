@@ -6,12 +6,13 @@ import uuid
 from pathlib import Path
 from typing import Dict
 
+#from watchdog.observers import Observer
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver  # NAS等网络硬盘监听
+from app.core.config import ( INPUT_DIR, FILE_STABLE_CHECK_INTERVAL, FILE_STABLE_MAX_WAIT, INPUT_WATCH_MODE, INPUT_WATCH_INTERVAL,)
+
 from watchdog.events import FileSystemEventHandler
 
-from app.core.config import (
-    INPUT_DIR, FILE_STABLE_CHECK_INTERVAL, FILE_STABLE_MAX_WAIT,
-)
 from app.db.session import SessionLocal
 from app.db.models import Task
 from app.pipeline.scheduler import PipelineScheduler
@@ -188,11 +189,54 @@ class InputHandler(FileSystemEventHandler):
         )
         logger.info("任务已创建: %s → %s", path, task_id)
 
-
+"""
 def start_watcher(scheduler: PipelineScheduler, loop: asyncio.AbstractEventLoop):
     handler = InputHandler(scheduler, loop)
     observer = Observer()
     observer.schedule(handler, str(INPUT_DIR), recursive=True)
     observer.start()
     logger.info("目录监听已启动: %s", INPUT_DIR)
+    return observer
+"""
+
+# 增加对NAS等网络硬盘监听
+def start_watcher(
+    scheduler: PipelineScheduler,
+    loop: asyncio.AbstractEventLoop
+):
+    handler = InputHandler(scheduler, loop)
+
+    mode = INPUT_WATCH_MODE
+
+    if mode == "polling":
+        observer = PollingObserver(
+            timeout=INPUT_WATCH_INTERVAL
+        )
+        logger.info(
+            "Input 目录使用轮询监听，扫描间隔：%.1f 秒",
+            INPUT_WATCH_INTERVAL,
+        )
+    elif mode == "native":
+        observer = Observer()
+        logger.info("Input 目录使用原生文件系统事件监听")
+    else:
+        raise ValueError(
+            f"不支持的 INPUT_WATCH_MODE：{mode}，"
+            "仅支持 native 或 polling"
+        )
+
+    observer.schedule(
+        handler,
+        str(INPUT_DIR),
+        recursive=True,
+    )
+
+    observer.start()
+
+    logger.info(
+        "目录监听已启动：%s，模式：%s",
+        INPUT_DIR,
+        mode,
+    )
+
     return observer

@@ -112,3 +112,9 @@ PERSON_DETECTOR_CONF = float(os.getenv("PERSON_DETECTOR_CONF", "0.35"))     # �
 # 人体匿名化增强
 PERSON_BLUR_STRENGTH = int(os.getenv("PERSON_BLUR_STRENGTH", "7"))  # 人体模糊强度 1~10
 PERSON_HEAD_RATIO = float(os.getenv("PERSON_HEAD_RATIO", "0.30"))   # 头部区域占人体框高度比例
+
+# Input 目录监听
+# native：原生文件系统事件监听
+# polling：轮询监听，适合 NAS/NFS/SMB 网络挂载
+INPUT_WATCH_MODE = os.getenv("INPUT_WATCH_MODE", "native").lower()
+INPUT_WATCH_INTERVAL = float( os.getenv("INPUT_WATCH_INTERVAL", "5.0"))
