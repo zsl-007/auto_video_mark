@@ -40,6 +40,24 @@ def _safe_path(base: Path, filename: str) -> Path:
     return target
 
 
+def _safe_input_relative_path(relative_path: str) -> Path:
+    """解析 input 下的相对路径，禁止路径穿越。"""
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="文件路径不能为空")
+
+    relative = Path(relative_path)
+
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HTTPException(status_code=400, detail="非法文件路径")
+
+    base = INPUT_DIR.resolve()
+    target = (base / relative).resolve()
+
+    if not target.is_relative_to(base):
+        raise HTTPException(status_code=400, detail="非法文件路径")
+
+    return target
+
 def _file_entry(path: Path) -> dict:
     st = path.stat()
     return {
@@ -82,31 +100,59 @@ def _map_status(task: Optional[Task]) -> str:
     return "unprocessed"
 
 
+
 @router.get("/input-files")
 def list_input_files(db: Session = Depends(get_db)):
     if not INPUT_DIR.exists():
         return []
+
     latest = _latest_tasks_by_filename(db)
     result = []
-    for p in INPUT_DIR.iterdir():
-        if not p.is_file() or p.name.startswith("."):
+
+    # 递归遍历 input 根目录及其所有子目录
+    for p in INPUT_DIR.rglob("*"):
+        # 跳过隐藏目录、隐藏文件
+        relative_path = p.relative_to(INPUT_DIR)
+
+        if any(part.startswith(".") for part in relative_path.parts):
             continue
-        entry = _file_entry(p)
-        task = latest.get(p.name)
-        entry["status"] = _map_status(task)
-        entry["task_id"] = task.id if task else None
-        entry["error_message"] = (
-            task.error_message
-            if task is not None and entry["status"] == "failed" else None
-        )
-        result.append(entry)
+
+        if not p.is_file():
+            continue
+
+        try:
+            # 防止符号链接指向 input 目录之外
+            resolved = p.resolve()
+            if not resolved.is_relative_to(INPUT_DIR.resolve()):
+                continue
+
+            entry = _file_entry(p)
+
+            # 保存相对路径，供前端显示和删除使用
+            entry["relative_path"] = relative_path.as_posix()
+
+            # 兼容现有任务状态匹配逻辑
+            task = latest.get(p.name)
+
+            entry["status"] = _map_status(task)
+            entry["task_id"] = task.id if task else None
+            entry["error_message"] = (
+                task.error_message
+                if task is not None and entry["status"] == "failed"
+                else None
+            )
+
+            result.append(entry)
+
+        except (OSError, RuntimeError):
+            logger.warning("读取 input 文件失败，跳过：%s", p)
+
     result.sort(key=lambda x: x["mtime"], reverse=True)
     return result
 
-
-@router.delete("/input-files/{filename}")
+@router.delete("/input-files/{filename:path}")
 def delete_input_file(filename: str, db: Session = Depends(get_db)):
-    path = _safe_path(INPUT_DIR, filename)
+    path = _safe_input_relative_path(filename)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
 

@@ -524,8 +524,8 @@
         const errTitle = f.error_message ? ` title="${escapeHtml(f.error_message)}"` : '';
         return `<tr data-idx="${realIdx}">
           <td>
-            <span class="file-name" title="${escapeHtml(f.filename)}">
-              <span class="icon">🎞️</span>${escapeHtml(f.filename)}
+            <span class="file-name" title="${escapeHtml(f.relative_path || f.filename)}">
+              <span class="icon">🎞️</span>${escapeHtml(f.relative_path || f.filename)}
             </span>
           </td>
           <td class="muted">${formatBytes(f.size)}</td>
@@ -850,10 +850,15 @@
     async function deleteInputFile(idx, btn) {
       const f = state.inputFiles[idx];
       if (!f) return;
-      if (!confirm(`确定删除 input/${f.filename}？此操作不可恢复。`)) return;
+
+      const filePath = f.relative_path || f.filename;
+      if (!confirm(`确定删除 input/${filePath}？此操作不可恢复。`)) return;
+
       btn.disabled = true;
       try {
-        await api(`/api/input-files/${encodeURIComponent(f.filename)}`, { method: 'DELETE' });
+        const encodedPath = filePath.split('/').map(part => encodeURIComponent(part)).join('/');
+        await api(`/api/input-files/${encodedPath}`, { method: 'DELETE' });
+
         showToast(`已删除 ${f.filename}`, 'success');
       } catch (e) {
         showToast(`删除失败：${e.message}`, 'error', 4000);
