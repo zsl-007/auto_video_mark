@@ -85,7 +85,7 @@
       static_frame_drop_enabled: { label: '丢弃静态帧', fmt: v => v ? '开启（输出无音频）' : '关闭', },
       static_recovery_enabled: { label: '静态不足回收', fmt: v => v ? '开启' : '关闭', },
       small_video_merge_enabled: { label: '小视频合并（整体合并关闭时生效）', fmt: v => v ? '开启' : '关闭', },  
-      small_video_min_duration: { label: '小视频时长阈值', fmt: v => `${v} 秒`, },    
+      small_video_min_duration: { label: '小视频时长阈值(低于时长阀值的视频不保留)', fmt: v => `${v} 秒`, },    
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
       face_blur_strength: { label: '人脸模糊强度（越大越模糊）', fmt: v => `${v} / 10`, },
       face_expand_scale: { label: '人脸打码范围（包含头发）', fmt: v => `${Number(v).toFixed(2)}×`, }, 
