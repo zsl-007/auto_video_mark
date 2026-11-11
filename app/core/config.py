@@ -32,6 +32,8 @@ MPDECIMATE_FRAC = os.getenv("MPDECIMATE_FRAC", "0.33")      # ffmpeg 中进行�
 STATIC_RECOVERY_ENABLED = os.getenv( "STATIC_RECOVERY_ENABLED", "false").lower() == "true"      # 静态不足回收
 SMALL_VIDEO_MERGE_ENABLED = os.getenv( "SMALL_VIDEO_MERGE_ENABLED", "false").lower() == "true"  # 小视频合并
 
+SMALL_VIDEO_MIN_DURATION = int( os.getenv("SMALL_VIDEO_MIN_DURATION", "300") )  # 小视频最小保留时长（秒）
+
 # 匿名化
 ANONYMIZE_FACE = os.getenv("ANONYMIZE_FACE", "true").lower() == "true"
 ANONYMIZE_PLATE = os.getenv("ANONYMIZE_PLATE", "true").lower() == "true"

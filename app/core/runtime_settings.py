@@ -33,6 +33,7 @@ EDITABLE_KEYS = (
     "static_frame_drop_enabled",
     "static_recovery_enabled",
     "small_video_merge_enabled",
+    "small_video_min_duration",
     "anonymize_face",
     "face_blur_strength",
     "face_expand_scale",
@@ -81,6 +82,7 @@ def _defaults() -> dict[str, Any]:
         "static_frame_drop_enabled": bool(config.STATIC_FRAME_DROP_ENABLED),
         "static_recovery_enabled": bool(config.STATIC_RECOVERY_ENABLED),
         "small_video_merge_enabled": bool(config.SMALL_VIDEO_MERGE_ENABLED),
+        "small_video_min_duration": int(config.SMALL_VIDEO_MIN_DURATION),
         "anonymize_face": bool(config.ANONYMIZE_FACE),
         "face_blur_strength": int(config.FACE_BLUR_STRENGTH),
         "face_expand_scale": float(config.FACE_EXPAND_SCALE),  
@@ -158,6 +160,15 @@ def _validate(patch: dict[str, Any]) -> dict[str, Any]:
 
     if "small_video_merge_enabled" in patch:
         clean["small_video_merge_enabled"] = bool( patch["small_video_merge_enabled"] )
+
+    if "small_video_min_duration" in patch:
+        try:
+            v = int(patch["small_video_min_duration"])
+        except (TypeError, ValueError):
+            raise SettingsValidationError( "small_video_min_duration 必须是整数" )
+        if not 1 <= v <= 7200:
+            raise SettingsValidationError( "small_video_min_duration 须在 1–7200 秒之间" )
+        clean["small_video_min_duration"] = v
 
     if "anonymize_face" in patch:
         clean["anonymize_face"] = bool(patch["anonymize_face"])

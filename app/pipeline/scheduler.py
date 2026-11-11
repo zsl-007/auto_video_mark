@@ -323,23 +323,29 @@ def _merge_small_video_groups(
     video_paths: list[Path],
     stem: str,
     segment_duration: int,
+    min_duration: int = 300,
 ) -> list[Path]:
     """
-    合并连续的短视频分组。
+    合并连续的短视频，并根据最小保留时长筛选结果。
 
     规则：
-    1. 以匿名化后的视频实际时长判断。
-    2. 时长小于 segment_duration 的视频进入待合并组。
+    1. 使用匿名化后视频的实际时长判断。
+    2. 时长小于 segment_duration 的视频进入待处理组。
     3. 连续短视频达到 2 个及以上时执行合并。
-    4. 只有一个短视频时，原样保留。
-    5. 遇到正常长度视频时，先处理之前的短视频组。
-    6. 最后仍有待合并组时，执行收尾处理。
+    4. 只有 1 个短视频时不合并，但仍然检查最小保留时长。
+    5. 合并后检查合并视频的实际时长。
+    6. 所有短视频处理结果均须达到 min_duration 才能保留。
+    7. 正常长度视频不受 min_duration 限制。
     """
+
     if not video_paths:
         return []
 
     if segment_duration <= 0:
         raise ValueError("分段时长必须大于 0")
+
+    if min_duration <= 0:
+        raise ValueError("小视频时长阈值必须大于 0")
 
     output_paths: list[Path] = []
     pending: list[Path] = []
@@ -351,11 +357,47 @@ def _merge_small_video_groups(
         if not pending:
             return
 
-        # 只有一个短视频，不需要重新合并。
+        # --------------------------------------------------
+        # 情况一：只有一个短视频
+        # 不执行合并，但必须检查实际时长。
+        # --------------------------------------------------
+
         if len(pending) == 1:
-            output_paths.append(pending[0])
+
+            video_path = pending[0]
+
+            info = _probe_video_metadata(video_path)
+            duration = float(info["duration"])
+
+            if duration >= min_duration:
+
+                logger.info(
+                    "小视频保留：%s，时长 %.2f 秒，"
+                    "达到阈值 %d 秒",
+                    video_path.name,
+                    duration,
+                    min_duration,
+                )
+
+                output_paths.append(video_path)
+
+            else:
+
+                logger.info(
+                    "小视频丢弃：%s，时长 %.2f 秒，"
+                    "低于阈值 %d 秒",
+                    video_path.name,
+                    duration,
+                    min_duration,
+                )
+
             pending = []
             return
+
+        # --------------------------------------------------
+        # 情况二：多个短视频
+        # 合并后检查实际时长。
+        # --------------------------------------------------
 
         merged_path = WORKDIR / (
             f"{stem}_smallmerge_{uuid.uuid4().hex}.mp4"
@@ -367,37 +409,101 @@ def _merge_small_video_groups(
             merged_path.name,
         )
 
-        merge(
-            list(pending),
-            merged_path,
-            WORKDIR,
-        )
+        try:
 
-        output_paths.append(merged_path)
-        pending = []
+            merge(
+                list(pending),
+                merged_path,
+                WORKDIR,
+            )
+
+            if not merged_path.exists():
+                raise RuntimeError(
+                    f"小视频合并失败，未生成文件：{merged_path}"
+                )
+
+            info = _probe_video_metadata(merged_path)
+            merged_duration = float(info["duration"])
+
+            if merged_duration >= min_duration:
+
+                logger.info(
+                    "小视频合并结果保留：%s，"
+                    "合并后时长 %.2f 秒，达到阈值 %d 秒",
+                    merged_path.name,
+                    merged_duration,
+                    min_duration,
+                )
+
+                output_paths.append(merged_path)
+
+            else:
+
+                logger.info(
+                    "小视频合并结果丢弃：%s，"
+                    "合并后时长 %.2f 秒，低于阈值 %d 秒",
+                    merged_path.name,
+                    merged_duration,
+                    min_duration,
+                )
+
+                merged_path.unlink(missing_ok=True)
+
+        except Exception:
+
+            # 合并或元数据检查失败时清理不完整产物。
+            try:
+                merged_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "清理小视频合并失败产物异常：%s",
+                    merged_path,
+                )
+
+            raise
+
+        finally:
+            pending = []
+
+    # --------------------------------------------------
+    # 按原视频顺序处理
+    # --------------------------------------------------
 
     for video_path in video_paths:
+
         info = _probe_video_metadata(video_path)
         duration = float(info["duration"])
 
         if duration < segment_duration:
+
+            # 短视频进入待合并组。
             pending.append(video_path)
             continue
 
-        # 正常长度视频之前的短视频组先处理。
+        # 遇到正常长度视频：
+        # 先处理前面的短视频组。
         flush_pending()
 
-        # 正常长度视频独立保留。
+        # 正常长度视频直接保留，不受小视频阈值限制。
         output_paths.append(video_path)
 
     # 处理最后一组短视频。
     flush_pending()
 
     logger.info(
-        "小视频合并完成：原视频 %d 个，最终视频 %d 个",
+        "小视频处理完成：原视频 %d 个，最终保留 %d 个，"
+        "最小保留时长 %d 秒",
         len(video_paths),
         len(output_paths),
+        min_duration,
     )
+
+    # 所有视频都被阈值筛选掉时，明确报错。
+    if not output_paths:
+        raise RuntimeError(
+            f"小视频处理后没有可保留的视频："
+            f"所有短视频处理结果均低于 {min_duration} 秒"
+        )
 
     return output_paths
 
@@ -907,24 +1013,28 @@ class PipelineScheduler:
                 small_video_merge_enabled
                 and settings["segment_enabled"]
                 and not settings["merge_enabled"]
-                and len(anonymized) > 1
             ):
 
-                task.status = "merging"
-                db.commit()
+                # 多个视频时，可能需要实际执行合并。
+                # 只有一个视频时，也必须执行阈值检查。
+                if len(anonymized) > 1:
 
-                await manager.broadcast({
-                    "task_id": task_id,
-                    "status": "merging",
-                })
+                    task.status = "merging"
+                    db.commit()
+
+                    await manager.broadcast({
+                        "task_id": task_id,
+                        "status": "merging",
+                    })
 
                 anonymized = await asyncio.to_thread(
                     _merge_small_video_groups,
                     anonymized,
                     stem,
                     int(settings["segment_duration"]),
+                    int(settings.get("small_video_min_duration", 300)),
                 )
-                
+
             """
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
 

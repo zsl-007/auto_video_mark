@@ -36,7 +36,8 @@
       { key: 'static_process_threshold', type: 'number', min: 0, max: 1, step: 0.01 },
       { key: 'static_frame_drop_enabled', type: 'boolean' },
       { key: 'static_recovery_enabled', type: 'boolean' },
-      { key: 'small_video_merge_enabled', type: 'boolean' },      
+      { key: 'small_video_merge_enabled', type: 'boolean' },
+      { key: 'small_video_min_duration', type: 'number', min: 1, max: 7200, step: 1 },      
       { key: 'anonymize_face',   type: 'boolean' },
       { key: 'face_blur_strength', type: 'number', min: 1, max: 10, step: 1 },
       { key: 'face_expand_scale', type: 'number', min: 1, max: 2.5, step: 0.05 },
@@ -83,7 +84,8 @@
       static_process_threshold: { label: '动态帧比例阈值（不足时回收或丢弃）', fmt: v => v },
       static_frame_drop_enabled: { label: '丢弃静态帧', fmt: v => v ? '开启（输出无音频）' : '关闭', },
       static_recovery_enabled: { label: '静态不足回收', fmt: v => v ? '开启' : '关闭', },
-      small_video_merge_enabled: { label: '小视频合并（整体合并关闭时生效）', fmt: v => v ? '开启' : '关闭', },      
+      small_video_merge_enabled: { label: '小视频合并（整体合并关闭时生效）', fmt: v => v ? '开启' : '关闭', },  
+      small_video_min_duration: { label: '小视频时长阈值', fmt: v => `${v} 秒`, },    
       anonymize_face: { label: '人脸匿名化', fmt: v => v ? '开启' : '关闭' },
       face_blur_strength: { label: '人脸模糊强度（越大越模糊）', fmt: v => `${v} / 10`, },
       face_expand_scale: { label: '人脸打码范围（包含头发）', fmt: v => `${Number(v).toFixed(2)}×`, }, 
@@ -627,6 +629,19 @@
         };
         spSwitch.addEventListener('change', sync);
         sync();
+      }
+
+      // 小视频合并开关联动时长阈值
+      const smallMergeSwitch = els.settingsList.querySelector('[data-key="small_video_merge_enabled"]');
+      const smallMergeDuration = els.settingsList.querySelector('[data-key="small_video_min_duration"]');
+      if (smallMergeSwitch && smallMergeDuration) {
+        const syncSmallMerge = () => {
+          const enabled = smallMergeSwitch.checked;
+          smallMergeDuration.disabled = !enabled;
+          smallMergeDuration.style.opacity = enabled ? '1' : '.5';
+        };
+        smallMergeSwitch.addEventListener('change', syncSmallMerge);
+        syncSmallMerge();
       }
 
       // 多目标跟踪开关联动
