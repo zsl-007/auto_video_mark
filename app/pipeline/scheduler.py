@@ -324,23 +324,50 @@ def _rename_output_files(
 def _merge_small_video_groups(
     video_paths: list[Path],
     stem: str,
+    segment_duration: int = 600,
     min_duration: int = 300,
 ) -> list[Path]:
     """
-    只合并实际时长小于 min_duration 的连续视频分段。
+    处理匿名化后的小视频分段。
 
-    规则：
-    1. 使用匿名化后视频的实际时长判断。
-    2. 时长 >= min_duration：直接保留，不参与合并。
-    3. 时长 < min_duration：进入待合并组。
-    4. 连续短视频达到 2 个及以上时执行合并。
-    5. 只有 1 个短视频时不执行合并，按原有规则检查并丢弃。
-    6. 合并后检查实际时长，低于 min_duration 则丢弃。
-    7. 保持原视频顺序。
+    参数：
+        video_paths：
+            匿名化完成的视频列表，保持原始分段顺序。
+
+        stem：
+            原始视频文件名主体。
+
+        segment_duration：
+            分段时长，用于判断视频是否属于小视频。
+
+        min_duration：
+            小视频最终保留的最小时长。
+
+    处理规则：
+    1. 视频实际时长 >= segment_duration：
+       作为正常分段直接保留，不参与小视频合并，也不受小视频阈值限制。
+
+    2. 视频实际时长 < segment_duration：
+       作为小视频，加入连续短视频分组。
+
+    3. 只有一个小视频：
+       不执行合并，检查其实际时长。
+       达到 min_duration 才保留，否则丢弃。
+
+    4. 多个连续小视频：
+       先执行合并，再检查合并结果的实际时长。
+       达到 min_duration 才保留，否则丢弃。
+
+    5. 保持视频原始顺序。
+
+    6. 所有视频都被过滤时，明确抛出异常。
     """
 
     if not video_paths:
         return []
+
+    if segment_duration <= 0:
+        raise ValueError("视频分段时长必须大于 0")
 
     if min_duration <= 0:
         raise ValueError("小视频时长阈值必须大于 0")
@@ -349,18 +376,21 @@ def _merge_small_video_groups(
     pending: list[Path] = []
 
     def flush_pending():
-        """处理连续的小于阈值的视频分组。"""
+        """
+        处理当前连续的小视频分组。
+        """
         nonlocal pending
 
         if not pending:
             return
 
         # --------------------------------------------------
-        # 只有一个短视频：不合并，检查是否达到保留阈值
+        # 只有一个小视频：不合并，直接检查实际时长
         # --------------------------------------------------
 
         if len(pending) == 1:
             video_path = pending[0]
+
             info = _probe_video_metadata(video_path)
             duration = float(info["duration"])
 
@@ -368,14 +398,17 @@ def _merge_small_video_groups(
                 output_paths.append(video_path)
 
                 logger.info(
-                    "小视频保留：%s，时长 %.2f 秒",
+                    "小视频保留：%s，时长 %.2f 秒，"
+                    "达到保留阈值 %d 秒",
                     video_path.name,
                     duration,
+                    min_duration,
                 )
+
             else:
                 logger.info(
                     "小视频丢弃：%s，时长 %.2f 秒，"
-                    "低于阈值 %d 秒",
+                    "低于保留阈值 %d 秒",
                     video_path.name,
                     duration,
                     min_duration,
@@ -385,7 +418,7 @@ def _merge_small_video_groups(
             return
 
         # --------------------------------------------------
-        # 多个连续短视频：执行合并
+        # 多个连续小视频：执行合并
         # --------------------------------------------------
 
         merged_path = WORKDIR / (
@@ -393,8 +426,10 @@ def _merge_small_video_groups(
         )
 
         logger.info(
-            "开始合并短视频：%d 个，阈值 %d 秒",
+            "开始合并小视频：%d 个，"
+            "分段时长 %d 秒，保留阈值 %d 秒",
             len(pending),
+            segment_duration,
             min_duration,
         )
 
@@ -417,14 +452,17 @@ def _merge_small_video_groups(
                 output_paths.append(merged_path)
 
                 logger.info(
-                    "小视频合并完成并保留：%s，合并后 %.2f 秒",
+                    "小视频合并完成并保留：%s，"
+                    "合并后 %.2f 秒，达到保留阈值 %d 秒",
                     merged_path.name,
                     merged_duration,
+                    min_duration,
                 )
+
             else:
                 logger.info(
-                    "小视频合并结果丢弃：%s，合并后 %.2f 秒，"
-                    "低于阈值 %d 秒",
+                    "小视频合并结果丢弃：%s，"
+                    "合并后 %.2f 秒，低于保留阈值 %d 秒",
                     merged_path.name,
                     merged_duration,
                     min_duration,
@@ -440,6 +478,7 @@ def _merge_small_video_groups(
                     "清理小视频合并失败产物异常：%s",
                     merged_path,
                 )
+
             raise
 
         finally:
@@ -453,48 +492,51 @@ def _merge_small_video_groups(
         info = _probe_video_metadata(video_path)
         duration = float(info["duration"])
 
-        if duration < min_duration:
-            # 只有小于小视频时长阈值的分段才进入合并组
+        # 使用分段时长判断是否属于小视频
+        if duration < segment_duration:
             pending.append(video_path)
 
             logger.info(
-                "发现短视频：%s，时长 %.2f 秒，低于阈值 %d 秒",
+                "发现小视频：%s，时长 %.2f 秒，"
+                "低于分段时长 %d 秒",
                 video_path.name,
                 duration,
-                min_duration,
+                segment_duration,
             )
+
             continue
 
-        # 遇到达到阈值的视频：
-        # 先处理之前积累的短视频。
+        # 遇到正常长度视频：
+        # 先处理前面累积的小视频
         flush_pending()
 
-        # 当前视频直接保留，绝不参与小视频合并。
+        # 正常长度视频直接保留，不受小视频阈值限制
         output_paths.append(video_path)
 
         logger.info(
             "正常分段直接保留：%s，时长 %.2f 秒，"
-            "达到小视频阈值 %d 秒",
+            "达到分段时长 %d 秒",
             video_path.name,
             duration,
-            min_duration,
+            segment_duration,
         )
 
-    # 处理最后一组短视频
+    # 处理最后一组小视频
     flush_pending()
 
     logger.info(
         "小视频处理完成：原视频 %d 个，最终保留 %d 个，"
-        "小视频时长阈值 %d 秒",
+        "分段时长 %d 秒，小视频保留阈值 %d 秒",
         len(video_paths),
         len(output_paths),
+        segment_duration,
         min_duration,
     )
 
     if not output_paths:
         raise RuntimeError(
-            f"小视频处理后没有可保留的视频："
-            f"所有短视频处理结果均低于 {min_duration} 秒"
+            "小视频处理后没有可保留的视频："
+            f"所有小视频处理结果均低于 {min_duration} 秒"
         )
 
     return output_paths
@@ -1162,10 +1204,12 @@ class PipelineScheduler:
 
                 await self.checkpoint(task_id)
 
+
                 anonymized = await asyncio.to_thread(
                     _merge_small_video_groups,
                     anonymized,
                     stem,
+                    int(settings.get("segment_duration", 600)),
                     int(settings.get("small_video_min_duration", 300)),
                 )
 
