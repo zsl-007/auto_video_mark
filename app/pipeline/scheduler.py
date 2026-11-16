@@ -623,30 +623,48 @@ class PipelineScheduler:
                     await self._process(task_id)
 
                 except Exception as e:
-                    logger.exception("任务处理异常: %s", task_id)
+                    logger.exception( "任务处理异常：%s", task_id, )
+
+                    # _process() 正常情况下已经处理了失败状态。
+                    # 这里仅处理 _process() 尚未成功写入失败状态的情况。
+                    check_db = SessionLocal()
 
                     try:
-                        self._mark_failed(
-                            task_id,
-                            "unknown",
-                            str(e),
+                        task = check_db.query(Task).filter( Task.id == task_id ).first()
+
+                        needs_mark_failed = (
+                            task is not None
+                            and task.status not in terminal_statuses
                         )
-                    except Exception:
-                        logger.exception(
-                            "兜底 mark_failed 失败: %s",
-                            task_id,
-                        )
+
+                    finally:
+                        check_db.close()
+
+                    if needs_mark_failed:
+                        try:
+                            self._mark_failed( task_id, "unknown", str(e), )
+
+                        except Exception:
+                            logger.exception( "兜底 mark_failed 失败：%s", task_id, )
 
             finally:
                 self.queue.task_done()
 
     async def _process(self, task_id: str):
         db = SessionLocal()
-        task = db.query(Task).filter(Task.id == task_id).first()
+        task = db.query(Task).filter( Task.id == task_id ).first()
 
         if not task:
             db.close()
             self.controls.pop(task_id, None)
+            return
+
+        # 防止 Worker 取出任务后，
+        # 用户已经通过 API 将任务停止、取消或删除。
+        if task.status in { "completed", "failed", "stopped", "cancelled", }:
+            db.close()
+            self.controls.pop(task_id, None)
+            logger.info( "任务已经处于终态，跳过执行：%s，状态：%s", task_id, task.status, )
             return
 
         stem: str = ""
@@ -1344,6 +1362,8 @@ class PipelineScheduler:
                     await asyncio.to_thread(_cleanup_intermediates, stem)
                 except Exception:
                     logger.exception("清理中间文件异常: %s", stem)
+            # 任务结束后释放控制器
+            self.controls.pop(task_id, None)                    
 
     def _mark_failed(self, task_id: str, stage: str, message: str):
         db = SessionLocal()

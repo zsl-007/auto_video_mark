@@ -353,9 +353,7 @@ async def stop_task(
         task.status = "stopped"
         task.finished_at = datetime.utcnow()
 
-        scheduler.controls.pop(task_id, None)
-
-        response_status = "stopped"
+        response_status = "stopped"    
     else:
         task.status = "stopping"
         response_status = "stopping"
@@ -396,9 +394,7 @@ async def cancel_task(
         task.error_message = "用户取消了任务"
         task.finished_at = datetime.utcnow()
 
-        scheduler.controls.pop(task_id, None)
-
-        response_status = "cancelled"
+        response_status = "cancelled"    
     else:
         task.status = "cancelling"
         response_status = "cancelling"
