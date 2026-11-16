@@ -577,9 +577,31 @@ class PipelineScheduler:
         control = self.get_control(task_id)
         await control.checkpoint_async()
 
-    def set_stage(self, task_id: str, status: str):
+
+    def set_stage(self, task_id: str, status: str) -> bool:
+        """
+        原子更新任务阶段。
+        如果任务处于暂停状态，不允许覆盖暂停状态。
+        """
         control = self.get_control(task_id)
-        control.current_stage = status
+        return control.try_set_stage(status)
+
+    async def transition_stage( self, task_id: str, task, db, status: str, ):
+        """
+        安全切换任务阶段。
+        如果切换过程中收到暂停请求，则等待任务恢复后再切换。
+        """
+        while True:
+            await self.checkpoint(task_id)
+            control = self.get_control(task_id)
+            with control.state_lock:
+                control._check_terminal()
+                if not control.resume_event.is_set():
+                    continue
+                control.current_stage = status
+                task.status = status
+                db.commit()
+                return
 
     def pause_task(self, task_id: str):
         self.get_control(task_id).pause()
@@ -720,36 +742,26 @@ class PipelineScheduler:
             settings = get_settings()
 
             task.started_at = datetime.utcnow()
-            task.status = "prechecking"
-
-            self.set_stage(task_id, "prechecking")
-
-            db.commit()
+            await self.transition_stage( task_id, task, db, "prechecking", )
 
             source = Path(task.source_path)
             stem = source.stem
 
-            await self.checkpoint(task_id)
-            task.status = "prechecking"
-            self.set_stage(task_id, "prechecking")
-            db.commit()
+            await self.transition_stage( task_id, task, db, "prechecking", )
+
             await manager.broadcast({"task_id": task_id,"status": "prechecking",})
             prechecked = await asyncio.to_thread(precheck, source, WORKDIR,)
             # 预检完成后检查
             await self.checkpoint(task_id)
 
-            await self.checkpoint(task_id)
-            task.status = "compressing"
-            self.set_stage(task_id, "compressing")
-            db.commit()
+            await self.transition_stage( task_id, task, db, "compressing", )
+
             await manager.broadcast({ "task_id": task_id, "status": "compressing", })
             compressed = await asyncio.to_thread( compress, prechecked, WORKDIR, settings, stem, )
             await self.checkpoint(task_id)
 
-            await self.checkpoint(task_id)
-            task.status = "segmenting"
-            self.set_stage(task_id, "segmenting")
-            db.commit()
+            await self.transition_stage( task_id, task, db, "segmenting", )
+
             await manager.broadcast({ "task_id": task_id, "status": "segmenting", })
             segments = await asyncio.to_thread( segment, compressed, WORKDIR, settings, )
             await self.checkpoint(task_id)
@@ -759,9 +771,8 @@ class PipelineScheduler:
             # --------------------------------------------------
 
             if settings["static_process_enabled"]:
-                task.status = "static_processing"
-                self.set_stage(task_id, "static_processing")
-                db.commit()
+
+                await self.transition_stage( task_id, task, db, "static_processing", )                
 
                 await manager.broadcast({
                     "task_id": task_id,
@@ -1028,10 +1039,7 @@ class PipelineScheduler:
             # --------------------------------------------------
             # 匿名化阶段：汇总整个任务的帧处理进度
             # --------------------------------------------------
-            await self.checkpoint(task_id)
-            task.status = "anonymizing"
-            self.set_stage(task_id, "anonymizing")
-            db.commit()            
+            await self.transition_stage( task_id, task, db, "anonymizing", )            
 
             # 每个分段的总帧数
             segment_totals = await asyncio.to_thread(
@@ -1192,10 +1200,7 @@ class PipelineScheduler:
                 # 多个视频时，可能需要实际执行合并。
                 # 只有一个视频时，也必须执行阈值检查。
                 if len(anonymized) > 1:
-
-                    task.status = "merging"
-                    self.set_stage(task_id, "merging")
-                    db.commit()
+                    await self.transition_stage( task_id, task, db, "merging", )
 
                     await manager.broadcast({
                         "task_id": task_id,
@@ -1244,9 +1249,7 @@ class PipelineScheduler:
             await self.checkpoint(task_id)
 
             # 进入最终输出阶段
-            task.status = "finalizing"
-            self.set_stage(task_id, "finalizing")
-            db.commit()
+            await self.transition_stage( task_id, task, db, "finalizing", )            
 
             await manager.broadcast({ "task_id": task_id, "status": "finalizing", })
 

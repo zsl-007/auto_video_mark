@@ -19,12 +19,25 @@
       cancelled: '已取消',
       finalizing: '生成最终输出',
     };
+
     const STATUS_PROGRESS = {
-      queued: 0, prechecking: 10, compressing: 18, segmenting: 25,
-      static_processing: 40, anonymizing: 65, merging: 90,
-      completed: 100, failed: 100,
-      paused: 65, stopping: 65, cancelling: 65, finalizing: 95, stopped: 100, cancelled: 100,
+      queued: 0,
+      prechecking: 10,
+      compressing: 18,
+      segmenting: 25,
+      static_processing: 40,
+      anonymizing: 65,
+      merging: 90,
+      completed: 100,
+      failed: 100,
+      paused: 0,
+      stopping: 0,
+      cancelling: 0,
+      finalizing: 95,
+      stopped: 100,
+      cancelled: 100,
     };
+    
     const RUNNING_STATUSES = new Set([
       'prechecking', 'compressing', 'segmenting', 'static_processing', 'anonymizing', 'merging',
       'stopping', 'cancelling', 'finalizing',
@@ -509,10 +522,17 @@
       );
 
       // 匿名化阶段使用真实帧进度计算进度条宽度
-      let progress = STATUS_PROGRESS[task.status] ?? 0;
+      // 计算任务实际所处阶段
+      const progressStage = task.status === 'paused'
+        ? (task.paused_stage || 'queued')
+        : task.status;
 
+      // 默认使用阶段进度
+      let progress = STATUS_PROGRESS[progressStage] ?? 0;
+
+      // 匿名化阶段使用真实帧进度
       if (
-        task.status === 'anonymizing' &&
+        progressStage === 'anonymizing' &&
         frameTotal > 0
       ) {
         progress = Math.min(
@@ -520,6 +540,7 @@
           Math.round(frameCurrent / frameTotal * 100)
         );
       }
+
 
       // 显示当前帧数 / 总帧数
       const frameProgressText = frameTotal > 0

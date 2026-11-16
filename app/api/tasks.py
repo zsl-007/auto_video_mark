@@ -167,11 +167,40 @@ def _enrich_task_dict(task: Task) -> dict:
 # 路由
 # ---------------------------------------------------------------------------
 
+
+from fastapi.encoders import jsonable_encoder
+
+
 @router.get("")
 def list_tasks(db: Session = Depends(get_db)):
-    tasks = db.query(Task).order_by(Task.created_at.desc()).all()
-    return [_enrich_task_dict(t) for t in tasks]
+    tasks = db.query(Task).order_by(
+        Task.created_at.desc()
+    ).all()
 
+    scheduler = PipelineScheduler.get_active_instance()
+
+    result = []
+
+    for task in tasks:
+        item = jsonable_encoder(task)
+
+        # 暂停任务需要返回暂停前的阶段
+        if task.status == "paused":
+            control = (
+                scheduler.controls.get(task.id)
+                if scheduler is not None
+                else None
+            )
+
+            if control is not None:
+                item["paused_stage"] = control.current_stage
+            else:
+                # 控制器不存在时的兼容处理
+                item["paused_stage"] = "queued"
+
+        result.append(item)
+
+    return result
 
 @router.get("/{task_id}")
 def get_task(task_id: str, db: Session = Depends(get_db)):
@@ -274,20 +303,40 @@ async def pause_task(
         )
 
     scheduler = _get_scheduler()
-    scheduler.pause_task(task_id)
+    control = scheduler.get_control(task_id)
 
-    task.status = "paused"
-    db.commit()
+    # 与阶段切换共用同一把锁
+    with control.state_lock:
+        control._check_terminal()
+
+        if not control.resume_event.is_set():
+            raise HTTPException(
+                status_code=409,
+                detail="任务已经处于暂停状态",
+            )
+
+        # 保存暂停前的阶段
+        if task.status != "queued":
+            control.current_stage = task.status
+
+        control.pause()
+
+        task.status = "paused"
+        db.commit()
+
+        paused_stage = control.current_stage
 
     await manager.broadcast({
         "task_id": task_id,
         "status": "paused",
+        "paused_stage": paused_stage,
     })
 
     return {
         "task_id": task_id,
         "status": "paused",
-        "message": "任务已请求暂停",
+        "paused_stage": paused_stage,
+        "message": "任务已暂停",
     }
 
 
@@ -307,18 +356,25 @@ async def resume_task(
     scheduler = _get_scheduler()
     control = scheduler.get_control(task_id)
 
-    # 排队任务恢复后仍然保持排队状态；
-    # 已经开始处理的任务恢复到原处理阶段。
-    resume_status = (
-        control.current_stage
-        if task.started_at
-        else "queued"
-    )
+    with control.state_lock:
+        control._check_terminal()
 
-    scheduler.resume_task(task_id)
+        if control.resume_event.is_set():
+            raise HTTPException(
+                status_code=409,
+                detail="任务当前没有处于暂停状态",
+            )
 
-    task.status = resume_status
-    db.commit()
+        # 排队任务恢复后仍然保持排队状态
+        if not task.started_at:
+            resume_status = "queued"
+        else:
+            resume_status = control.current_stage
+
+        task.status = resume_status
+        control.resume()
+
+        db.commit()
 
     await manager.broadcast({
         "task_id": task_id,
@@ -330,7 +386,6 @@ async def resume_task(
         "status": resume_status,
         "message": "任务已继续",
     }
-
 
 @router.post("/{task_id}/stop")
 async def stop_task(
