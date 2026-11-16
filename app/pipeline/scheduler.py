@@ -322,27 +322,23 @@ def _rename_output_files(
 def _merge_small_video_groups(
     video_paths: list[Path],
     stem: str,
-    segment_duration: int,
     min_duration: int = 300,
 ) -> list[Path]:
     """
-    合并连续的短视频，并根据最小保留时长筛选结果。
+    只合并实际时长小于 min_duration 的连续视频分段。
 
     规则：
     1. 使用匿名化后视频的实际时长判断。
-    2. 时长小于 segment_duration 的视频进入待处理组。
-    3. 连续短视频达到 2 个及以上时执行合并。
-    4. 只有 1 个短视频时不合并，但仍然检查最小保留时长。
-    5. 合并后检查合并视频的实际时长。
-    6. 所有短视频处理结果均须达到 min_duration 才能保留。
-    7. 正常长度视频不受 min_duration 限制。
+    2. 时长 >= min_duration：直接保留，不参与合并。
+    3. 时长 < min_duration：进入待合并组。
+    4. 连续短视频达到 2 个及以上时执行合并。
+    5. 只有 1 个短视频时不执行合并，按原有规则检查并丢弃。
+    6. 合并后检查实际时长，低于 min_duration 则丢弃。
+    7. 保持原视频顺序。
     """
 
     if not video_paths:
         return []
-
-    if segment_duration <= 0:
-        raise ValueError("分段时长必须大于 0")
 
     if min_duration <= 0:
         raise ValueError("小视频时长阈值必须大于 0")
@@ -351,38 +347,30 @@ def _merge_small_video_groups(
     pending: list[Path] = []
 
     def flush_pending():
-        """处理当前连续短视频组。"""
+        """处理连续的小于阈值的视频分组。"""
         nonlocal pending
 
         if not pending:
             return
 
         # --------------------------------------------------
-        # 情况一：只有一个短视频
-        # 不执行合并，但必须检查实际时长。
+        # 只有一个短视频：不合并，检查是否达到保留阈值
         # --------------------------------------------------
 
         if len(pending) == 1:
-
             video_path = pending[0]
-
             info = _probe_video_metadata(video_path)
             duration = float(info["duration"])
 
             if duration >= min_duration:
-
-                logger.info(
-                    "小视频保留：%s，时长 %.2f 秒，"
-                    "达到阈值 %d 秒",
-                    video_path.name,
-                    duration,
-                    min_duration,
-                )
-
                 output_paths.append(video_path)
 
+                logger.info(
+                    "小视频保留：%s，时长 %.2f 秒",
+                    video_path.name,
+                    duration,
+                )
             else:
-
                 logger.info(
                     "小视频丢弃：%s，时长 %.2f 秒，"
                     "低于阈值 %d 秒",
@@ -395,8 +383,7 @@ def _merge_small_video_groups(
             return
 
         # --------------------------------------------------
-        # 情况二：多个短视频
-        # 合并后检查实际时长。
+        # 多个连续短视频：执行合并
         # --------------------------------------------------
 
         merged_path = WORKDIR / (
@@ -404,13 +391,12 @@ def _merge_small_video_groups(
         )
 
         logger.info(
-            "小视频合并：%d 个视频，输出 %s",
+            "开始合并短视频：%d 个，阈值 %d 秒",
             len(pending),
-            merged_path.name,
+            min_duration,
         )
 
         try:
-
             merge(
                 list(pending),
                 merged_path,
@@ -426,22 +412,17 @@ def _merge_small_video_groups(
             merged_duration = float(info["duration"])
 
             if merged_duration >= min_duration:
-
-                logger.info(
-                    "小视频合并结果保留：%s，"
-                    "合并后时长 %.2f 秒，达到阈值 %d 秒",
-                    merged_path.name,
-                    merged_duration,
-                    min_duration,
-                )
-
                 output_paths.append(merged_path)
 
-            else:
-
                 logger.info(
-                    "小视频合并结果丢弃：%s，"
-                    "合并后时长 %.2f 秒，低于阈值 %d 秒",
+                    "小视频合并完成并保留：%s，合并后 %.2f 秒",
+                    merged_path.name,
+                    merged_duration,
+                )
+            else:
+                logger.info(
+                    "小视频合并结果丢弃：%s，合并后 %.2f 秒，"
+                    "低于阈值 %d 秒",
                     merged_path.name,
                     merged_duration,
                     min_duration,
@@ -450,8 +431,6 @@ def _merge_small_video_groups(
                 merged_path.unlink(missing_ok=True)
 
         except Exception:
-
-            # 合并或元数据检查失败时清理不完整产物。
             try:
                 merged_path.unlink(missing_ok=True)
             except OSError:
@@ -459,46 +438,57 @@ def _merge_small_video_groups(
                     "清理小视频合并失败产物异常：%s",
                     merged_path,
                 )
-
             raise
 
         finally:
             pending = []
 
     # --------------------------------------------------
-    # 按原视频顺序处理
+    # 按视频原始顺序判断
     # --------------------------------------------------
 
     for video_path in video_paths:
-
         info = _probe_video_metadata(video_path)
         duration = float(info["duration"])
 
-        if duration < segment_duration:
-
-            # 短视频进入待合并组。
+        if duration < min_duration:
+            # 只有小于小视频时长阈值的分段才进入合并组
             pending.append(video_path)
+
+            logger.info(
+                "发现短视频：%s，时长 %.2f 秒，低于阈值 %d 秒",
+                video_path.name,
+                duration,
+                min_duration,
+            )
             continue
 
-        # 遇到正常长度视频：
-        # 先处理前面的短视频组。
+        # 遇到达到阈值的视频：
+        # 先处理之前积累的短视频。
         flush_pending()
 
-        # 正常长度视频直接保留，不受小视频阈值限制。
+        # 当前视频直接保留，绝不参与小视频合并。
         output_paths.append(video_path)
 
-    # 处理最后一组短视频。
+        logger.info(
+            "正常分段直接保留：%s，时长 %.2f 秒，"
+            "达到小视频阈值 %d 秒",
+            video_path.name,
+            duration,
+            min_duration,
+        )
+
+    # 处理最后一组短视频
     flush_pending()
 
     logger.info(
         "小视频处理完成：原视频 %d 个，最终保留 %d 个，"
-        "最小保留时长 %d 秒",
+        "小视频时长阈值 %d 秒",
         len(video_paths),
         len(output_paths),
         min_duration,
     )
 
-    # 所有视频都被阈值筛选掉时，明确报错。
     if not output_paths:
         raise RuntimeError(
             f"小视频处理后没有可保留的视频："
@@ -506,6 +496,7 @@ def _merge_small_video_groups(
         )
 
     return output_paths
+
 
 class PipelineScheduler:
     def __init__(self):
@@ -1031,7 +1022,6 @@ class PipelineScheduler:
                     _merge_small_video_groups,
                     anonymized,
                     stem,
-                    int(settings["segment_duration"]),
                     int(settings.get("small_video_min_duration", 300)),
                 )
 
