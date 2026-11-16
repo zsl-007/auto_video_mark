@@ -76,27 +76,6 @@ def get_db():
 _SEG_OUTPUT_RE = re.compile(
     r"^(?P<stem>.+)_\d{4}-.+\.mp4$"
 )
-_MULTI_OUTPUT_RE_CACHE: dict[str, re.Pattern] = {}
-
-"""
-def _multi_output_pattern(stem: str) -> re.Pattern:
-    pat = _MULTI_OUTPUT_RE_CACHE.get(stem)
-    if pat is None:
-        pat = re.compile(rf"^{re.escape(stem)}_anonymized_\d{{4}}\.mp4$")
-        _MULTI_OUTPUT_RE_CACHE[stem] = pat
-    return pat
-"""
-def _multi_output_pattern(stem: str) -> re.Pattern:
-    pat = _MULTI_OUTPUT_RE_CACHE.get(stem)
-
-    if pat is None:
-        pat = re.compile(
-            rf"^{re.escape(stem)}_\d{{4}}-.+\.mp4$"
-        )
-
-        _MULTI_OUTPUT_RE_CACHE[stem] = pat
-
-    return pat
 
 def _collect_output_files(task: Task) -> list[str]:
     """
