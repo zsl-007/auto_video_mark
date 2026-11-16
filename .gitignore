@@ -2,7 +2,7 @@
 input/
 output/
 workdir/
-db/
+/db/
 
 # ===== 模型权重（体积大，建议单独分发）=====
 models/*.pt
