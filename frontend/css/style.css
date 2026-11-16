@@ -413,3 +413,28 @@ main { max-width: 1400px; margin: 0 auto; padding: 24px; display: flex; flex-dir
   line-height: 1.9;
   word-break: break-all;
 }
+
+/* ========== 任务操作按钮 ========== */
+
+.task-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  min-width: 220px;
+}
+
+.task-actions .btn {
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .task-actions {
+    min-width: 200px;
+  }
+
+  .task-actions .btn {
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+}

@@ -12,14 +12,22 @@
       merging: '合并中',
       completed: '已完成',
       failed: '失败',
+      paused: '已暂停',
+      stopping: '正在停止',
+      cancelling: '正在取消',
+      stopped: '已停止',
+      cancelled: '已取消',
+      finalizing: '生成最终输出',
     };
     const STATUS_PROGRESS = {
       queued: 0, prechecking: 10, compressing: 18, segmenting: 25,
       static_processing: 40, anonymizing: 65, merging: 90,
       completed: 100, failed: 100,
+      paused: 65, stopping: 65, cancelling: 65, finalizing: 95, stopped: 100, cancelled: 100,
     };
     const RUNNING_STATUSES = new Set([
       'prechecking', 'compressing', 'segmenting', 'static_processing', 'anonymizing', 'merging',
+      'stopping', 'cancelling', 'finalizing',
     ]);
     const INPUT_FILE_STATUS = {
       unprocessed: { label: '未处理',   cls: 'pending'   },
@@ -228,12 +236,31 @@
       if (!p) return '';
       return p.split(/[\\/]/).pop();
     }
+
     function statusClass(status) {
-      if (status === 'completed') return 'completed';
-      if (status === 'failed') return 'failed';
-      if (RUNNING_STATUSES.has(status)) return 'running';
+      if (
+        RUNNING_STATUSES.has(status)
+      ) {
+        return 'running';
+      }
+    
+      if (status === 'completed') {
+        return 'completed';
+      }
+    
+      if (status === 'failed' ||
+          status === 'stopped' ||
+          status === 'cancelled') {
+        return 'failed';
+      }
+    
+      if (status === 'paused') {
+        return 'pending';
+      }
+    
       return 'pending';
     }
+
     function debounce(fn, ms) {
       let t;
       return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
@@ -384,6 +411,90 @@
         els.tasksTable.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     }
+
+    function renderTaskActions(task) {
+      const id = escapeHtml(task.id);
+    
+      const btn = (action, label, cls = 'ghost') => `
+        <button
+          type="button"
+          class="btn small ${cls}"
+          data-task-action="${action}"
+          data-task-id="${id}"
+        >${label}</button>
+      `;
+    
+      const status = task.status;
+    
+      if (status === 'queued') {
+        return `
+          <div class="task-actions">
+            ${btn('pause', '暂停')}
+            ${btn('cancel', '取消', 'ghost')}
+            ${btn('detail', '详情')}
+          </div>
+        `;
+      }
+    
+      if (status === 'paused') {
+        return `
+          <div class="task-actions">
+            ${btn('resume', '继续', 'primary')}
+            ${btn('stop', '停止')}
+            ${btn('cancel', '取消')}
+            ${btn('detail', '详情')}
+          </div>
+        `;
+      }
+    
+      if ([
+        'prechecking',
+        'compressing',
+        'segmenting',
+        'static_processing',
+        'anonymizing',
+        'merging',
+      ].includes(status)) {
+        return `
+          <div class="task-actions">
+            ${btn('pause', '暂停')}
+            ${btn('stop', '停止')}
+            ${btn('cancel', '取消')}
+            ${btn('detail', '详情')}
+          </div>
+        `;
+      }
+    
+      if ([
+        'stopping',
+        'cancelling',
+        'finalizing',
+      ].includes(status)) {
+        return `
+          <div class="task-actions">
+            <span class="muted">正在处理...</span>
+            ${btn('detail', '详情')}
+          </div>
+        `;
+      }
+    
+      if ([
+        'completed',
+        'failed',
+        'stopped',
+        'cancelled',
+      ].includes(status)) {
+        return `
+          <div class="task-actions">
+            ${btn('delete', '删除', 'ghost')}
+            ${btn('detail', '详情')}
+          </div>
+        `;
+      }
+    
+      return btn('detail', '详情');
+    }
+    
     function renderTaskRow(task) {
       const cls = statusClass(task.status);
 
@@ -458,10 +569,107 @@
           <td class="col-duration muted">
             ${duration}${queueWait ? ` <span class="muted">（排队 ${queueWait}）</span>` : ''}
           </td>
-          <td><button class="btn small ghost" data-action="detail">详情</button></td>
+          <td>${renderTaskActions(task)}</td>
         </tr>`;
       }
-  
+
+      
+    async function handleTaskAction(action, taskId, button) {
+      const task = state.tasks.find(
+        t => t.id === taskId
+      );
+
+      if (!task) return;
+
+      const actionInfo = {
+        pause: {
+          url: 'pause',
+          method: 'POST',
+          confirm: null,
+          success: '已请求暂停任务',
+        },
+        resume: {
+          url: 'resume',
+          method: 'POST',
+          confirm: null,
+          success: '任务已继续',
+        },
+        stop: {
+          url: 'stop',
+          method: 'POST',
+          confirm: '确定停止这个任务吗？',
+          success: '已提交停止请求',
+        },
+        cancel: {
+          url: 'cancel',
+          method: 'POST',
+          confirm: '确定取消这个任务吗？取消后会清理中间文件。',
+          success: '已提交取消请求',
+        },
+        delete: {
+          url: '',
+          method: 'DELETE',
+          confirm: '确定删除这个任务记录及其分段、错误日志吗？不会删除 input 和 output 中的视频文件。',
+          success: '任务记录已删除',
+        },
+      };
+
+      if (action === 'detail') {
+        openDrawer(taskId);
+        return;
+      }
+
+      const info = actionInfo[action];
+      if (!info) return;
+
+      if (
+        info.confirm &&
+        !confirm(info.confirm)
+      ) {
+        return;
+      }
+
+      button.disabled = true;
+
+      try {
+        const url = action === 'delete'
+          ? `/api/tasks/${encodeURIComponent(taskId)}`
+          : `/api/tasks/${encodeURIComponent(taskId)}/${info.url}`;
+
+        await api(url, {
+          method: info.method,
+        });
+
+        showToast(info.success, 'success');
+
+        await Promise.all([
+          loadTasks(),
+          loadErrors(),
+        ]);
+
+        // 删除任务后，如果详情抽屉打开且对应任务已删除，则关闭
+        if (
+          action === 'delete' &&
+          els.drawer.classList.contains('open') &&
+          !state.tasks.some(t => t.id === taskId)
+        ) {
+          closeDrawer();
+        }
+
+      } catch (e) {
+        showToast(
+          `操作失败：${e.message}`,
+          'error',
+          5000
+        );
+
+        await loadTasks();
+
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     // ============ 渲染：错误日志 ============
     function renderErrors() {
       if (!state.errors.length) {
@@ -1245,11 +1453,46 @@
   
       // 任务表格
       els.tasksBody.addEventListener('click', (e) => {
-        const row = e.target.closest('tr[data-task-id]');
+
+        // 先处理任务操作按钮
+        const actionBtn = e.target.closest(
+          '[data-task-action]'
+        );
+      
+        if (actionBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+      
+          if (actionBtn.disabled) return;
+      
+          handleTaskAction(
+            actionBtn.dataset.taskAction,
+            actionBtn.dataset.taskId,
+            actionBtn
+          );
+      
+          return;
+        }
+      
+        // 再处理任务详情
+        const row = e.target.closest(
+          'tr[data-task-id]'
+        );
+      
         if (!row) return;
-        if (e.target.closest('a')) return;
-        openDrawer(row.getAttribute('data-task-id'));
-      });
+      
+        if (
+          e.target.closest('a') ||
+          e.target.closest('button')
+        ) {
+          return;
+        }
+      
+        openDrawer(
+          row.getAttribute('data-task-id')
+        );
+      });      
+
       els.tasksBody.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter' && e.key !== ' ') return;
         const row = e.target.closest('tr[data-task-id]');

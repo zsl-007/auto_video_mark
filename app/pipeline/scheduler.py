@@ -28,6 +28,8 @@ from app.pipeline.anonymize import anonymize
 from app.pipeline.merge import merge
 from app.ws.progress import manager
 
+from app.pipeline.task_control import (TaskControl,TaskStopped,TaskCancelled,)
+
 import cv2
 import threading
 import time
@@ -499,12 +501,55 @@ def _merge_small_video_groups(
 
 
 class PipelineScheduler:
+    _active_instance = None # 保存当前运行的调度器实例，供 tasks.py 的控制 API 使用
+
     def __init__(self):
-        self.queue: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
+        self.queue: asyncio.Queue[Optional[str]] = asyncio.Queue(
+            maxsize=QUEUE_MAXSIZE
+        )
         self.workers: list[asyncio.Task] = []
         self._running = False
         self._resource_task: Optional[asyncio.Task] = None
         self.gpu_sem: Optional[asyncio.Semaphore] = None
+
+        # 每个任务独立的控制器
+        self.controls: dict[str, TaskControl] = {}
+
+        # 供 API 获取当前运行的调度器实例
+        PipelineScheduler._active_instance = self
+
+    @classmethod
+    def get_active_instance(cls):
+        return cls._active_instance
+
+    def get_control(self, task_id: str) -> TaskControl:
+        control = self.controls.get(task_id)
+
+        if control is None:
+            control = TaskControl()
+            self.controls[task_id] = control
+
+        return control
+
+    async def checkpoint(self, task_id: str):
+        control = self.get_control(task_id)
+        await control.checkpoint_async()
+
+    def set_stage(self, task_id: str, status: str):
+        control = self.get_control(task_id)
+        control.current_stage = status
+
+    def pause_task(self, task_id: str):
+        self.get_control(task_id).pause()
+
+    def resume_task(self, task_id: str):
+        self.get_control(task_id).resume()
+
+    def stop_task(self, task_id: str):
+        self.get_control(task_id).request_stop()
+
+    def cancel_task(self, task_id: str):
+        self.get_control(task_id).request_cancel()
 
     async def start(self):
         self._running = True
@@ -529,6 +574,7 @@ class PipelineScheduler:
         logger.info("调度器已停止")
 
     async def enqueue(self, task_id: str):
+        self.get_control(task_id)
         await self.queue.put(task_id)
         logger.info("任务入队: %s", task_id)
 
@@ -538,63 +584,115 @@ class PipelineScheduler:
                 logger.warning("资源水位偏高，暂停取新任务")
             await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
 
+
     async def _worker(self):
+        terminal_statuses = {
+            "completed",
+            "failed",
+            "stopped",
+            "cancelled",
+        }
+
         while self._running:
             task_id = await self.queue.get()
+
             if task_id is None:
                 self.queue.task_done()
                 break
-            if not resource_ok():
-                await self.queue.put(task_id)
-                await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
-                self.queue.task_done()
-                continue
+
             try:
-                await self._process(task_id)
-            except Exception as e:
-                # _process 内部已 mark_failed；这里再兜底一次，防止未知异常吞掉队列
-                logger.exception("任务处理异常: %s", task_id)
+                # 用户可能在任务排队期间已经取消、停止或删除任务
+                db = SessionLocal()
                 try:
-                    self._mark_failed(task_id, "unknown", str(e))
-                except Exception:
-                    logger.exception("兜底 mark_failed 失败: %s", task_id)
+                    task = db.query(Task).filter(
+                        Task.id == task_id
+                    ).first()
+
+                    if not task or task.status in terminal_statuses:
+                        self.controls.pop(task_id, None)
+                        continue
+                finally:
+                    db.close()
+
+                if not resource_ok():
+                    await self.queue.put(task_id)
+                    await asyncio.sleep(RESOURCE_CHECK_INTERVAL)
+                    continue
+
+                try:
+                    await self._process(task_id)
+
+                except Exception as e:
+                    logger.exception("任务处理异常: %s", task_id)
+
+                    try:
+                        self._mark_failed(
+                            task_id,
+                            "unknown",
+                            str(e),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "兜底 mark_failed 失败: %s",
+                            task_id,
+                        )
+
             finally:
                 self.queue.task_done()
 
     async def _process(self, task_id: str):
         db = SessionLocal()
         task = db.query(Task).filter(Task.id == task_id).first()
+
         if not task:
             db.close()
+            self.controls.pop(task_id, None)
             return
 
         stem: str = ""
         success = False
+        cancelled = False
 
         try:
+            # 任务正式开始前，先检查控制状态
+            await self.checkpoint(task_id)
+
             settings = get_settings()
 
             task.started_at = datetime.utcnow()
             task.status = "prechecking"
-            db.commit()            
+
+            self.set_stage(task_id, "prechecking")
+
+            db.commit()
 
             source = Path(task.source_path)
             stem = source.stem
 
+            await self.checkpoint(task_id)
             task.status = "prechecking"
+            self.set_stage(task_id, "prechecking")
             db.commit()
-            await manager.broadcast({"task_id": task_id, "status": "prechecking"})
-            prechecked = await asyncio.to_thread(precheck, source, WORKDIR)
+            await manager.broadcast({"task_id": task_id,"status": "prechecking",})
+            prechecked = await asyncio.to_thread(precheck, source, WORKDIR,)
+            # 预检完成后检查
+            await self.checkpoint(task_id)
 
+            await self.checkpoint(task_id)
             task.status = "compressing"
+            self.set_stage(task_id, "compressing")
             db.commit()
-            await manager.broadcast({"task_id": task_id, "status": "compressing"})
-            compressed = await asyncio.to_thread(compress, prechecked, WORKDIR, settings, stem)
+            await manager.broadcast({ "task_id": task_id, "status": "compressing", })
+            compressed = await asyncio.to_thread( compress, prechecked, WORKDIR, settings, stem, )
+            await self.checkpoint(task_id)
 
+            await self.checkpoint(task_id)
             task.status = "segmenting"
+            self.set_stage(task_id, "segmenting")
             db.commit()
-            await manager.broadcast({"task_id": task_id, "status": "segmenting"})
-            segments = await asyncio.to_thread(segment, compressed, WORKDIR, settings)
+            await manager.broadcast({ "task_id": task_id, "status": "segmenting", })
+            segments = await asyncio.to_thread( segment, compressed, WORKDIR, settings, )
+            await self.checkpoint(task_id)
 
             # --------------------------------------------------
             # 静态处理阶段
@@ -602,6 +700,7 @@ class PipelineScheduler:
 
             if settings["static_process_enabled"]:
                 task.status = "static_processing"
+                self.set_stage(task_id, "static_processing")
                 db.commit()
 
                 await manager.broadcast({
@@ -631,11 +730,17 @@ class PipelineScheduler:
 
                 for idx, seg in enumerate(segments):
 
-                    # 原始动态帧比例。
+                    # 每个分段处理前检查
+                    await self.checkpoint(task_id)
+
+                    # 原始动态帧比例
                     ratio = await asyncio.to_thread(
                         process_static,
                         seg,
                     )
+
+                    # 静态检测完成后检查
+                    await self.checkpoint(task_id)
 
                     logger.info(
                         "静态检测：%s，动态帧比例 %.2f%%，阈值 %.2f%%",
@@ -677,12 +782,16 @@ class PipelineScheduler:
                         )
 
                         try:
+                            await self.checkpoint(task_id)
+
                             final_ratio = await asyncio.to_thread(
                                 recover_static_frames,
                                 seg,
                                 recovered_path,
                                 threshold,
                             )
+
+                            await self.checkpoint(task_id)
 
                             logger.info(
                                 "静态不足回收成功：%s，"
@@ -708,6 +817,8 @@ class PipelineScheduler:
                             # 回收成功后不能再执行完全去重。
                             continue
 
+                        except (TaskStopped, TaskCancelled):
+                            raise
                         except Exception as e:
 
                             logger.exception(
@@ -750,11 +861,13 @@ class PipelineScheduler:
                         )
 
                         try:
+                            await self.checkpoint(task_id)
                             await asyncio.to_thread(
                                 drop_static_frames,
                                 seg,
                                 deduped,
                             )
+                            await self.checkpoint(task_id)
 
                             db.add(Segment(
                                 task_id=task_id,
@@ -768,6 +881,8 @@ class PipelineScheduler:
 
                             kept.append(deduped)
 
+                        except (TaskStopped, TaskCancelled):
+                            raise
                         except Exception as e:
 
                             logger.warning(
@@ -853,8 +968,10 @@ class PipelineScheduler:
             # --------------------------------------------------
             # 匿名化阶段：汇总整个任务的帧处理进度
             # --------------------------------------------------
+            await self.checkpoint(task_id)
             task.status = "anonymizing"
-            db.commit()
+            self.set_stage(task_id, "anonymizing")
+            db.commit()            
 
             # 每个分段的总帧数
             segment_totals = await asyncio.to_thread(
@@ -926,8 +1043,7 @@ class PipelineScheduler:
 
                 def on_frame_progress(current, total):
                     """
-                    单个分段的进度回调。
-                    该回调运行在线程池工作线程中。
+                    保留你当前完整的帧进度回调代码，不需要修改。
                     """
                     with progress_lock:
                         if total > 0:
@@ -937,20 +1053,27 @@ class PipelineScheduler:
                             0,
                             min(
                                 int(current),
-                                segment_totals[idx]
+                                segment_totals[idx],
                             ) if segment_totals[idx] > 0
                             else int(current)
                         )
 
                     publish_progress()
 
+                # 等待 GPU 资源期间也可以响应暂停、停止和取消
+                await self.checkpoint(task_id)
+
                 async with self.gpu_sem:
+
+                    await self.checkpoint(task_id)
+
                     await asyncio.to_thread(
                         anonymize,
                         seg,
                         out,
                         settings,
                         on_frame_progress,
+                        self.get_control(task_id).checkpoint,
                     )
 
                 return idx, out
@@ -978,7 +1101,7 @@ class PipelineScheduler:
             results.sort(key=lambda x: x[0])
             anonymized = [r[1] for r in results]
 
-            # 所有分段匿名化完成，强制推送最终帧数
+            await self.checkpoint(task_id)
 
             # 所有分段匿名化完成，强制推送最终帧数
             with progress_lock:
@@ -1011,6 +1134,7 @@ class PipelineScheduler:
                 if len(anonymized) > 1:
 
                     task.status = "merging"
+                    self.set_stage(task_id, "merging")
                     db.commit()
 
                     await manager.broadcast({
@@ -1018,12 +1142,16 @@ class PipelineScheduler:
                         "status": "merging",
                     })
 
+                await self.checkpoint(task_id)
+
                 anonymized = await asyncio.to_thread(
                     _merge_small_video_groups,
                     anonymized,
                     stem,
                     int(settings.get("small_video_min_duration", 300)),
                 )
+
+                await self.checkpoint(task_id)
 
             """
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
@@ -1050,6 +1178,16 @@ class PipelineScheduler:
             # 最终输出视频
             # --------------------------------------------------
 
+            # 最终输出前，最后一次检查控制状态
+            await self.checkpoint(task_id)
+
+            # 进入最终输出阶段
+            task.status = "finalizing"
+            self.set_stage(task_id, "finalizing")
+            db.commit()
+
+            await manager.broadcast({ "task_id": task_id, "status": "finalizing", })
+
             final_output = OUTPUT_DIR / f"{stem}_anonymized.mp4"
 
             output_paths = []
@@ -1066,15 +1204,6 @@ class PipelineScheduler:
                 output_paths = [final_output]
 
             elif settings["merge_enabled"]:
-
-                # 多段视频合并
-                task.status = "merging"
-                db.commit()
-
-                await manager.broadcast({
-                    "task_id": task_id,
-                    "status": "merging",
-                })
 
                 await asyncio.to_thread(
                     merge,
@@ -1132,14 +1261,81 @@ class PipelineScheduler:
                 "output": str(final_output),
             })
 
+
+        except TaskStopped as e:
+            db.rollback()
+
+            stopped_db = SessionLocal()
+            try:
+                stopped_task = stopped_db.query(Task).filter(
+                    Task.id == task_id
+                ).first()
+
+                if stopped_task:
+                    stopped_task.status = "stopped"
+                    stopped_task.error_message = str(e)
+                    stopped_task.finished_at = datetime.utcnow()
+                    stopped_db.commit()
+            finally:
+                stopped_db.close()
+
+            await manager.broadcast({
+                "task_id": task_id,
+                "status": "stopped",
+            })
+
+        except TaskCancelled as e:
+            db.rollback()
+
+            cancelled_db = SessionLocal()
+            try:
+                cancelled_task = cancelled_db.query(Task).filter(
+                    Task.id == task_id
+                ).first()
+
+                if cancelled_task:
+                    cancelled_task.status = "cancelled"
+                    cancelled_task.error_message = str(e)
+                    cancelled_task.finished_at = datetime.utcnow()
+                    cancelled_db.commit()
+            finally:
+                cancelled_db.close()
+
+            # 取消任务时清理中间文件
+            if stem:
+                try:
+                    await asyncio.to_thread(
+                        _cleanup_intermediates,
+                        stem,
+                    )
+                except Exception:
+                    logger.exception(
+                        "取消任务后清理中间文件失败: %s",
+                        stem,
+                    )
+
+            await manager.broadcast({
+                "task_id": task_id,
+                "status": "cancelled",
+            })
+
         except Exception as e:
             db.rollback()
-            self._mark_failed(task_id, task.status or "unknown", str(e))
+
+            self._mark_failed(
+                task_id,
+                task.status or "unknown",
+                str(e),
+            )
+
             await manager.broadcast({
-                "task_id": task_id, "status": "failed",
+                "task_id": task_id,
+                "status": "failed",
                 "error": str(e),
             })
+
             raise
+
         finally:
             db.close()
             # 只在成功路径清理中间文件；清理失败不影响任务状态

@@ -76,6 +76,7 @@ from tenacity import (
 from app.core.config import ANONYMIZE_MAX_RETRIES, ANONYMIZE_RETRY_BACKOFF
 from .blur.engine import process_video
 
+from app.pipeline.task_control import (TaskStopped,TaskCancelled,)
 
 class AnonymizeError(RuntimeError):
     pass
@@ -87,15 +88,29 @@ class AnonymizeError(RuntimeError):
     retry=retry_if_exception_type(AnonymizeError),
     reraise=True,
 )
-def anonymize( input_path: Path, output_path: Path, settings: dict | None = None, progress_callback=None,):
+
+def anonymize(
+    input_path: Path,
+    output_path: Path,
+    settings: dict | None = None,
+    progress_callback=None,
+    control_callback=None,
+):
     if settings is None:
         from app.core.runtime_settings import get_settings
         settings = get_settings()
 
     try:
-        process_video(input_path,output_path,settings,progress_callback=progress_callback,)
+        process_video(input_path,output_path,settings,progress_callback=progress_callback,control_callback=control_callback,)
+    except (TaskStopped, TaskCancelled):
+        # 用户控制指令不属于匿名化失败，不进行重试
+        raise
+
     except Exception as e:
         # CUDA OOM 不可恢复，直接抛出避免无意义重试
         if "out of memory" in str(e).lower():
             raise
-        raise AnonymizeError(f"匿名化失败: {e}") from e
+
+        raise AnonymizeError(
+            f"匿名化失败: {e}"
+        ) from e        

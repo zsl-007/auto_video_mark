@@ -67,8 +67,8 @@ def _get_detectors(cache_key, factory) -> _DetectorBundle:
         logger.info("线程 %s 首次加载匿名化模型 key=%s",
                     threading.get_ident(), cache_key)
     return bundle
-def process_video( input_path: Path, output_path: Path, settings: dict,
-                imgsz: int | None = None, batch_size: int | None = None, progress_callback=None,):
+
+def process_video(input_path: Path,output_path: Path,settings: dict,imgsz: int | None = None,batch_size: int | None = None,progress_callback=None,control_callback=None,):
     """进程内完成一段视频的人脸/车牌模糊。"""
     from app.core import config as cfg
 
@@ -199,6 +199,12 @@ def process_video( input_path: Path, output_path: Path, settings: dict,
 
         if not frame_buffer:
             return
+
+        # 每批开始前检查暂停、停止和取消指令。
+        # 正在执行的 GPU 推理批次不会被强制中断。
+        if control_callback is not None:
+            control_callback()
+
         n = len(frame_buffer)
 
         if bundle.plate_detector is not None:
