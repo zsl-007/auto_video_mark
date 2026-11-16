@@ -244,8 +244,11 @@ def recover_static_frames(
 
     from app.core.hardware import encoder_args
 
+
     def encode_recovered(max_drop: int):
-        """执行一次回收编码。"""
+        """执行回收编码；硬件编码失败时自动回退 libx264。"""
+
+        from app.core.hardware import encoder_args
 
         filter_expr = (
             f"mpdecimate=frac={MPDECIMATE_FRAC}:"
@@ -253,7 +256,7 @@ def recover_static_frames(
             "setpts=N/FRAME_RATE/TB"
         )
 
-        cmd = [
+        common_args = [
             "ffmpeg",
             "-y",
             "-nostdin",
@@ -262,33 +265,67 @@ def recover_static_frames(
             "-i", str(segment_path),
             "-vf", filter_expr,
             "-an",
-            *encoder_args(),
-            "-movflags", "+faststart",
-            str(output_path),
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        def run_encode(codec_args):
+            # 删除上一次可能产生的不完整文件
+            if output_path.exists():
+                output_path.unlink()
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                "静态不足回收编码失败："
-                f"{result.stderr[-1500:]}"
+            cmd = [
+                *common_args,
+                *codec_args,
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
             )
 
-        if (
-            not output_path.exists()
-            or output_path.stat().st_size <= 0
-        ):
-            raise RuntimeError(
-                f"静态不足回收输出文件为空: {output_path}"
+            if result.returncode != 0:
+                raise RuntimeError(
+                    result.stderr[-2000:]
+                )
+
+            if (
+                not output_path.exists()
+                or output_path.stat().st_size <= 0
+            ):
+                raise RuntimeError(
+                    f"回收输出文件为空: {output_path}"
+                )
+
+        # 第一次使用系统选择的编码器
+        selected_args = encoder_args()
+
+        try:
+            run_encode(selected_args)
+
+        except Exception as hardware_error:
+
+            # 如果本来就是 CPU 编码，不再重复尝试
+            if "h264_nvenc" not in selected_args and \
+               "h264_qsv" not in selected_args:
+                raise
+
+            logger.warning(
+                "静态回收硬件编码失败，自动回退 CPU 编码。"
+                "分段：%s，原因：%s",
+                segment_path.name,
+                hardware_error,
             )
 
-        # 只读取回收视频实际总帧数。
-        # 不再对重新编码后的视频重复运行 mpdecimate。
+            # 第二次使用 CPU 编码
+            run_encode([
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+            ])
+
+        # 读取回收视频实际总帧数
         recovered_total_frames = _get_total_frames(
             output_path
         )
