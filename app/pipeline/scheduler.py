@@ -424,7 +424,7 @@ def _merge_small_video_groups(
 
         logger.info(
             "开始合并小视频：%d 个，"
-            "分段时长 %d 秒，保留阈值 %d 秒",
+            "保留阈值 %d 秒",
             len(pending),
             min_duration,
         )
@@ -510,10 +510,11 @@ def _merge_small_video_groups(
         output_paths.append(video_path)
 
         logger.info(
-            "正常分段直接保留：%s，时长 %.2f 秒，"
-            "达到分段时长 %d 秒",
+            "分段直接保留：%s，实际时长 %.2f 秒，"
+            "达到或超过小视频阈值 %d 秒",
             video_path.name,
             duration,
+            min_duration,
         )
 
     # 处理最后一组小视频
@@ -521,7 +522,7 @@ def _merge_small_video_groups(
 
     logger.info(
         "小视频处理完成：原视频 %d 个，最终保留 %d 个，"
-        "分段时长 %d 秒，小视频保留阈值 %d 秒",
+        "小视频保留阈值 %d 秒",
         len(video_paths),
         len(output_paths),
         min_duration,
