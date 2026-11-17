@@ -8,9 +8,11 @@
 import json
 import subprocess
 from pathlib import Path
+import logging
 
 from app.core.hardware import encoder_args
 
+logger = logging.getLogger(__name__)
 
 def _get_stream_info(path: Path) -> list[dict]:
     """获取视频流信息。"""
@@ -193,48 +195,123 @@ def merge(
             "[outv]",
         ])
 
+
         # --------------------------------------------------
-        # 4. 重新编码视频
+        # 4. 构建编码参数
         # --------------------------------------------------
 
-        cmd.extend(encoder_args())
+        selected_encoder_args = encoder_args()
+
+        encode_cmd = list(cmd)
 
         if has_audio:
-            cmd.extend([
+            encode_cmd.extend([
                 "-map", "[outa]",
                 "-c:a", "aac",
             ])
         else:
-            cmd.append("-an")
+            encode_cmd.append("-an")
 
-        cmd.extend([
+        encode_cmd.extend([
             "-movflags", "+faststart",
             str(output_path),
         ])
 
         # --------------------------------------------------
-        # 5. 执行合并
+        # 5. 执行合并，硬件编码失败时回退 CPU
         # --------------------------------------------------
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        def run_merge(codec_args: list[str]):
+            """
+            使用指定编码器执行视频合并。
+            每次执行前删除可能残留的不完整输出文件。
+            """
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                "视频合并失败: "
-                f"{result.stderr[-3000:]}"
+            try:
+                if output_path.exists():
+                    output_path.unlink()
+            except OSError as e:
+                raise RuntimeError(
+                    f"无法清理旧的合并输出文件: {e}"
+                ) from e
+
+            run_cmd = (
+                encode_cmd[:-len([
+                    "-movflags", "+faststart",
+                    str(output_path),
+                ])]
+                + codec_args
+                + [
+                    "-movflags", "+faststart",
+                    str(output_path),
+                ]
             )
 
-        if (
-            not output_path.exists()
-            or output_path.stat().st_size <= 0
-        ):
-            raise RuntimeError(
-                f"视频合并输出为空: {output_path}"
+            result = subprocess.run(
+                run_cmd,
+                capture_output=True,
+                text=True,
             )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    result.stderr[-3000:]
+                    or "FFmpeg 合并编码失败"
+                )
+
+            if (
+                not output_path.exists()
+                or output_path.stat().st_size <= 0
+            ):
+                raise RuntimeError(
+                    "FFmpeg 合并完成，但输出文件为空"
+                )
+
+        try:
+            # 优先使用硬件编码器或当前探测到的编码器
+            run_merge(selected_encoder_args)
+
+        except Exception as hardware_error:
+
+            # 只有硬件编码器失败时才回退 CPU。
+            # libx264 自身失败时直接抛出错误。
+            hardware_encoder_selected = any(
+                encoder in selected_encoder_args
+                for encoder in (
+                    "h264_nvenc",
+                    "h264_qsv",
+                )
+            )
+
+            if not hardware_encoder_selected:
+                raise RuntimeError(
+                    f"视频合并失败: {hardware_error}"
+                ) from hardware_error
+
+            logger.warning(
+                "视频合并硬件编码失败，尝试回退 libx264。"
+                "原始错误: %s",
+                hardware_error,
+            )
+
+            try:
+                run_merge([
+                    "-c:v", "libx264",
+                    "-preset", "medium",
+                    "-crf", "23",
+                ])
+
+                logger.info(
+                    "视频合并已通过 libx264 CPU 编码完成: %s",
+                    output_path,
+                )
+
+            except Exception as cpu_error:
+                raise RuntimeError(
+                    "视频合并失败：硬件编码和 CPU 编码均失败。"
+                    f"硬件编码错误: {hardware_error}；"
+                    f"CPU 编码错误: {cpu_error}"
+                ) from cpu_error
 
         # --------------------------------------------------
         # 6. 检查输出是否可以正常读取
